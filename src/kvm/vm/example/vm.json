@@ -1,0 +1,20 @@
+{
+    "vmPath": "../",
+    "smp": 2,
+    "ramInGB": 2,
+    "disks":[
+       "{vmPath}/data/disk1.json"
+    ],
+    "networks": [
+       "{vmPath}/data/iface_bridge_br1.json",
+       "{vmPath}/data/iface_bridge_br0.json"
+    ],
+    "vmState": "running",
+    "useCloudInit": true,
+    "ciIsoPath": "{vmPath}/cloud_init.iso",
+    "vmHostName": "docker-proxy",
+    "osType": "linux",
+    "osVariant": "ubuntu26.04",
+    "defaultPWD": "helloworld",
+    "hostCPU": true
+}

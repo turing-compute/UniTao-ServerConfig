@@ -1,0 +1,8 @@
+{
+    "imagePath": "{relative to data path for disk image}", 
+    "imageSource": "local",
+    "imageFormat": "qcow2",
+    "sizeInGB": 30,
+    "baseImagePath": "{relative data path for base image}",
+    "baseImageFormat": "qcow2"
+}

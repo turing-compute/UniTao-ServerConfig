@@ -62,8 +62,8 @@ class KvmVm:
             raise ValueError(f"Invalid path does not exists.[{self.Args.path}]")
         self.VmName = Util.file_data_name(self.Args.path)
         self.VmData = Util.read_json_file(self.Args.path)
-        self.Disks = []
-        self.Networks = []
+        self.Disks: list[KvmImage] = []
+        self.Networks: list[KvmNetwork] = []
         self.Validate()
 
     def Validate(self):
@@ -337,6 +337,7 @@ class KvmNetwork:
         UseDHCP4 = "useDHCP4"
         IPv4 = "ip4"
         Gateway4 = "gateway4"
+        RouteMetric = "routeMetric"
 
         class TapModes:
             Bridge = "bridge"
@@ -487,15 +488,23 @@ class KvmNetwork:
             ])
             gateway4 = self.NetData.get(self.Keyword.Gateway4, None)
             if gateway4 is not None:
-                network_config.extend([
+                route_config = [
                     f"    routes:",
                     f"      - to: 0.0.0.0/0",
-                    f"        via: {gateway4}          # Default gateway for your subnet",
+                    f"        via: {gateway4}          # Default gateway for your subnet"
+                ]
+                metric = self.NetData.get(self.Keyword.RouteMetric, None)
+                if metric is not None:
+                    route_config.append(
+                        f"        metric: {metric}          # Route metric (optional)"
+                    )
+                route_config.extend([
                     f"    nameservers:",
                     f"      addresses:",
                     f"        - 8.8.8.8                     # DNS server(s)",
                     f"        - 8.8.4.4"
                 ])
+                network_config.extend(route_config)
         return network_config
 
 

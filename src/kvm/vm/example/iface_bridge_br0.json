@@ -1,0 +1,8 @@
+{
+    "ifaceType": "bridge",
+    "bridgeName": "ovs-br0",
+    "bridgeType": "ovsBridge",
+    "macAddress": "{generated random mac address}",
+    "useDHCP4": false,
+    "ip4": "{ipv4 address for the interface}"
+}

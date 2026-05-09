@@ -1,0 +1,10 @@
+{
+    "ifaceType": "bridge",
+    "bridgeName": "ovs-br1",
+    "bridgeType": "ovsBridge",
+    "macAddress": "{generated random mac address}",
+    "useDHCP4": false,
+    "ip4": "{ipv4 address for the interface}",
+    "gateway4": "{default gateway for the interface}",
+    "routeMetric": "int value for route metric, 100, 200 ..., smaller value means higher priority"
+}
