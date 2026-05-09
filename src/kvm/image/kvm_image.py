@@ -88,8 +88,6 @@ class KvmImage:
         image_name, file_ext = os.path.splitext(image_file_name)
         if file_ext == "":
             raise ValueError(f"Invalid value, [{self.Keyword.ImagePath}]=[{image_path}], expect file extension [{self.Keyword.Formats.list()}]")
-        if image_name != self.ImagName:
-            raise ValueError(f"Image data file name should match image name. [{self.ImagName}]!=[{image_name}]")
         image_format = self.ImageData.get(self.Keyword.ImageFormat, None)
         if image_format is None:
             raise ValueError(f"Missing field [{self.Keyword.ImageFormat}] to specify image format")
