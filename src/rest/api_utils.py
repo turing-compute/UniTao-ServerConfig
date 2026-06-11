@@ -1,6 +1,6 @@
 import random
 
-from flask import Blueprint, jsonify, current_app
+from extlib.flask import Blueprint, jsonify, current_app
 
 utils_bp = Blueprint("utils", __name__)
 

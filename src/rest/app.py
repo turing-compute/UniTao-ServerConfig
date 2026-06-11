@@ -3,7 +3,7 @@
 import json
 import os
 
-from flask import Flask, jsonify
+from extlib.flask import Flask, jsonify
 
 from shared.logger import Log
 from rest.api_vm import vm_bp

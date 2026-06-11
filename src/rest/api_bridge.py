@@ -1,6 +1,6 @@
 import logging
 
-from flask import Blueprint, request, jsonify, current_app
+from extlib.flask import Blueprint, request, jsonify, current_app
 
 from shared.logger import Log
 from rest.service import list_entities, read_entity_data, write_entity_data, delete_entity, get_entity_path

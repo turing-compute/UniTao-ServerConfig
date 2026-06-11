@@ -3,7 +3,7 @@ import logging
 import os
 import random
 
-from flask import Blueprint, request, jsonify, current_app
+from extlib.flask import Blueprint, request, jsonify, current_app
 
 from shared.logger import Log
 from shared.utilities import Util
