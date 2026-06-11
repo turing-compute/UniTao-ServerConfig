@@ -55,13 +55,16 @@ class KvmVm:
         args = parser.parse_args()
         return args
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, data_path: str = None):
         self.log = logger
-        self.Args = KvmVm.parse_args()
-        if not os.path.exists(self.Args.path):
-            raise ValueError(f"Invalid path does not exists.[{self.Args.path}]")
-        self.VmName = Util.file_data_name(self.Args.path)
-        self.VmData = Util.read_json_file(self.Args.path)
+        if data_path is None:
+            args = KvmVm.parse_args()
+            data_path = args.path
+        self.DataPath = data_path
+        if not os.path.exists(self.DataPath):
+            raise ValueError(f"Invalid path does not exists.[{self.DataPath}]")
+        self.VmName = Util.file_data_name(self.DataPath)
+        self.VmData = Util.read_json_file(self.DataPath)
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
         self.Validate()
@@ -74,7 +77,7 @@ class KvmVm:
             raise ValueError(f"Missing field [{self.Keyword.VmPath}] in Vm Data")
         if not os.path.isabs(vm_path):
             self.log.info(f"found relative path [{self.Keyword.VmPath}]=[{vm_path}]")
-            data_file_path = os.path.dirname(self.Args.path)
+            data_file_path = os.path.dirname(self.DataPath)
             self.log.info(f"create abspath from data file path[{data_file_path}]")
             vm_path = Util.abs_path(data_file_path, vm_path)
             self.log.info(f"Update [{self.Keyword.VmPath}]=[{vm_path}]")
@@ -143,7 +146,7 @@ class KvmVm:
         if file_path.startswith(vm_path_prefix):
             return file_path.replace(vm_path_prefix, vm_path, 1)
         if not os.path.isabs(file_path):
-            return Util.abs_path(os.path.dirname(self.Args.path), file_path)
+            return Util.abs_path(os.path.dirname(self.DataPath), file_path)
         return file_path
 
     def Process(self):
@@ -184,9 +187,9 @@ class KvmVm:
         ci_def_path = os.path.join(ci_folder, "def_data")
         self.log.info(f"Create folder in cidata to hold metadata, [{ci_def_path}]")
         Util.run_command(f"mkdir -p {ci_def_path}")
-        vm_file = os.path.basename(self.Args.path)
+        vm_file = os.path.basename(self.DataPath)
         ci_vm_file = os.path.join(ci_def_path, vm_file)
-        Util.run_command(f"cp {self.Args.path} {ci_vm_file}")
+        Util.run_command(f"cp {self.DataPath} {ci_vm_file}")
         for net_file in self.VmData[self.Keyword.Networks]:
             real_net_file = self.parse_relative_path(net_file)
             net_file_name = os.path.basename(real_net_file)

@@ -1,0 +1,15 @@
+[Unit]
+Description=UniTao KVM Host
+After=network.target libvirtd.service
+
+[Service]
+Type=simple
+User=root
+ExecStart={{REPO_ROOT}}/src/rest/restapp.sh --config-dir {{CONFIG_DIR}}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
