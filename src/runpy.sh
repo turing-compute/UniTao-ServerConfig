@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # $(cd ... && pwd): Converts it to an absolute path.
 
 # Set PYTHONPATH to the current directory
-export PYTHONPATH="$SCRIPT_DIR:$SRC_DIR/extlib"
+export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/extlib"
 
 
 # Run the command passed as parameters
