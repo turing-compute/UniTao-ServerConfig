@@ -209,13 +209,14 @@ def get_vm(name: str):
                     data_files[f] = json.load(fh)
 
     virsh_state = _get_virsh_state(name)
+    result = {
+        "name": name,
+        "virshState": virsh_state,
+    }
+    result.update(data_files)
     return jsonify({
         "success": True,
-        "data": {
-            "name": name,
-            "virshState": virsh_state,
-            "files": data_files
-        }
+        "data": result
     })
 
 
