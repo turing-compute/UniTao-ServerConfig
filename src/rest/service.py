@@ -30,7 +30,7 @@ def get_image_file_dir(app) -> str:
     return _get_config(app)["imageFileDir"]
 
 
-# ── VM paths (nested: {vmDataDir}/{name}/data/vm-{name}.json) ──
+# ── VM paths (nested: {vmDataDir}/{name}/data/{name}.json) ──
 
 def vm_dir(app, name: str) -> str:
     """Return the VM root directory: {vmDataDir}/{name}/"""
@@ -44,7 +44,7 @@ def vm_data_dir(app, name: str) -> str:
 
 def vm_json_path(app, name: str) -> str:
     """Return the VM JSON definition file path."""
-    return os.path.join(vm_data_dir(app, name), f"vm-{name}.json")
+    return os.path.join(vm_data_dir(app, name), f"{name}.json")
 
 
 def list_entities(app, data_type: str) -> list:
@@ -64,7 +64,7 @@ def _list_vms(app) -> list:
         entry_path = os.path.join(parent, entry)
         if not os.path.isdir(entry_path):
             continue
-        vm_file = os.path.join(entry_path, "data", f"vm-{entry}.json")
+        vm_file = os.path.join(entry_path, "data", f"{entry}.json")
         if os.path.isfile(vm_file):
             names.append(entry)
     return sorted(names)
