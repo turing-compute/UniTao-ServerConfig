@@ -17,23 +17,28 @@ def _get_logger() -> logging.Logger:
 @image_bp.route("", methods=["GET"])
 def list_images():
     # Images with JSON definitions.
-    managed = set(list_entities(current_app, "image"))
+    managed_names = set(list_entities(current_app, "image"))
     images = []
-    for name in managed:
-        images.append({"name": name, "managed": True})
 
-    # Disk image files on disk without JSON definitions.
+    # Build a map of image filenames on disk.
     image_dir = get_image_file_dir(current_app)
+    disk_files = {}  # name → filename
     if os.path.isdir(image_dir):
         for f in sorted(os.listdir(image_dir)):
             file_path = os.path.join(image_dir, f)
             if not os.path.isfile(file_path):
                 continue
             name, ext = os.path.splitext(f)
-            if ext not in (".qcow2", ".img", ".raw"):
-                continue
-            if name not in managed:
-                images.append({"name": name, "file": f, "managed": False})
+            if ext in (".qcow2", ".img", ".raw"):
+                disk_files[name] = f
+
+    for name in managed_names:
+        file_name = disk_files.pop(name, None)
+        images.append({"name": name, "managed": True, "file": file_name})
+
+    # Remaining disk files have no JSON definition.
+    for name, file_name in sorted(disk_files.items()):
+        images.append({"name": name, "managed": False, "file": file_name})
 
     return jsonify({
         "success": True,
@@ -88,14 +93,41 @@ def create_image():
 
 @image_bp.route("/<name>", methods=["GET"])
 def get_image(name: str):
-    data = read_entity_data(current_app, "image", name)
-    if data is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"Image '{name}' not found"}
-        }), 404
-    data["entityName"] = name
+    # Strip known image extension from URL name if present.
+    base_name = name
+    for ext in (".qcow2", ".img", ".raw"):
+        if name.endswith(ext):
+            base_name = name[:-len(ext)]
+            break
+
+    # Check JSON definition first.
+    data = read_entity_data(current_app, "image", base_name)
+    if data is not None:
+        data["entityName"] = base_name
+        data["managed"] = True
+        return jsonify({"success": True, "data": data})
+
+    # Fallback: look for an unmanaged disk image file.
+    image_dir = get_image_file_dir(current_app)
+    if os.path.isdir(image_dir):
+        for f in os.listdir(image_dir):
+            base, ext = os.path.splitext(f)
+            if ext in (".qcow2", ".img", ".raw") and base == base_name:
+                file_path = os.path.join(image_dir, f)
+                size = os.path.getsize(file_path)
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "entityName": base_name,
+                        "name": base_name,
+                        "managed": False,
+                        "file": f,
+                        "path": file_path,
+                        "sizeBytes": size
+                    }
+                })
+
     return jsonify({
-        "success": True,
-        "data": data
-    })
+        "success": False,
+        "error": {"code": "NOT_FOUND", "message": f"Image '{name}' not found"}
+    }), 404
