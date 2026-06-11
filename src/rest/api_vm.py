@@ -84,11 +84,22 @@ def _gen_vm_json(name: str, cpu_number: int, os_name: str, os_size: int, config:
 
 @vm_bp.route("", methods=["GET"])
 def list_vms():
-    names = list_entities(current_app, "vm")
+    # VMs with JSON definitions in the data directory.
+    managed = set(list_entities(current_app, "vm"))
     vm_list = []
-    for name in names:
+    for name in managed:
         virsh_state = _get_virsh_state(name)
-        vm_list.append({"name": name, "virshState": virsh_state})
+        vm_list.append({"name": name, "virshState": virsh_state, "managed": True})
+
+    # VMs known to virsh but not yet managed by REST.
+    try:
+        result = Util.run_command("virsh list --name --all")
+        for name in result.stdout_lines:
+            if name and name not in managed:
+                vm_list.append({"name": name, "virshState": _get_virsh_state(name), "managed": False})
+    except SystemError:
+        pass
+
     return jsonify({
         "success": True,
         "data": {"vms": vm_list}
