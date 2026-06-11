@@ -191,19 +191,30 @@ def create_vm():
 
 @vm_bp.route("/<name>", methods=["GET"])
 def get_vm(name: str):
-    data = read_entity_data(current_app, "vm", name)
-    if data is None:
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
         return jsonify({
             "success": False,
             "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
         }), 404
+
+    # Load all JSON files from the VM's data directory.
+    data_dir = vm_data_dir(current_app, name)
+    data_files = {}
+    if os.path.isdir(data_dir):
+        for f in sorted(os.listdir(data_dir)):
+            if f.endswith(".json"):
+                file_path = os.path.join(data_dir, f)
+                with open(file_path, "r") as fh:
+                    data_files[f] = json.load(fh)
+
     virsh_state = _get_virsh_state(name)
     return jsonify({
         "success": True,
         "data": {
             "name": name,
-            "definition": data,
-            "virshState": virsh_state
+            "virshState": virsh_state,
+            "files": data_files
         }
     })
 

@@ -16,10 +16,28 @@ def _get_logger() -> logging.Logger:
 
 @image_bp.route("", methods=["GET"])
 def list_images():
-    names = list_entities(current_app, "image")
+    # Images with JSON definitions.
+    managed = set(list_entities(current_app, "image"))
+    images = []
+    for name in managed:
+        images.append({"name": name, "managed": True})
+
+    # Disk image files on disk without JSON definitions.
+    image_dir = get_image_file_dir(current_app)
+    if os.path.isdir(image_dir):
+        for f in sorted(os.listdir(image_dir)):
+            file_path = os.path.join(image_dir, f)
+            if not os.path.isfile(file_path):
+                continue
+            name, ext = os.path.splitext(f)
+            if ext not in (".qcow2", ".img", ".raw"):
+                continue
+            if name not in managed:
+                images.append({"name": name, "file": f, "managed": False})
+
     return jsonify({
         "success": True,
-        "data": {"images": names}
+        "data": {"images": images}
     })
 
 
