@@ -42,6 +42,13 @@ def create_app(config: dict = None) -> Flask:
     app.config["CONFIG"] = config
     app.config["JSONIFY_PRETTYPRINT_REGULAR"] = True
 
+    @app.route("/")
+    def root():
+        return jsonify({
+            "success": True,
+            "data": {"service": "UniTao KVM Host", "health": "/api/v1/utils/health"}
+        })
+
     app.register_blueprint(vm_bp, url_prefix="/api/v1/vms")
     app.register_blueprint(image_bp, url_prefix="/api/v1/images")
     app.register_blueprint(bridge_bp, url_prefix="/api/v1/bridges")
