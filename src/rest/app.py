@@ -92,14 +92,13 @@ def register_error_handlers(app: Flask):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="UniTao REST Agent")
-    parser.add_argument("--config-dir", type=str,
-                        default="/etc/unitiao",
-                        help="Directory containing config.json")
+    parser.add_argument("--config", type=str,
+                        default="/etc/unitiao/config.json",
+                        help="Path to config.json")
     args = parser.parse_args()
-    config_path = os.path.join(args.config_dir, "config.json")
 
     logger = Log.get_logger("REST")
-    config = load_config(config_path)
+    config = load_config(args.config)
     host = config.get("host", "0.0.0.0")
     port = config.get("port", 5000)
     logger.info(f"Starting UniTao REST Agent on {host}:{port}...")

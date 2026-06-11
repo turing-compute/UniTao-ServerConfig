@@ -9,10 +9,10 @@
 ## 手动启动
 
 ```bash
-./src/runpy.sh src/rest/app.py --config-dir /etc/unitiao
+./src/runpy.sh src/rest/app.py --config /etc/unitiao/config.json
 ```
 
-默认 `--config-dir` 为 `/etc/unitiao`，该目录下需有 `config.json`。
+默认 `--config` 为 `/etc/unitiao/config.json`。
 
 ## 部署为系统服务
 
