@@ -44,9 +44,18 @@ def create_app(config: dict = None) -> Flask:
 
     @app.route("/")
     def root():
+        endpoints = {}
+        for rule in app.url_map.iter_rules():
+            if rule.endpoint == "root":
+                continue
+            methods = sorted([m for m in rule.methods if m not in ("HEAD", "OPTIONS")])
+            endpoints[rule.endpoint] = f"{'|'.join(methods)} {rule.rule}"
         return jsonify({
             "success": True,
-            "data": {"service": "UniTao KVM Host", "health": "/api/v1/utils/health"}
+            "data": {
+                "service": "UniTao KVM Host",
+                "endpoints": endpoints
+            }
         })
 
     app.register_blueprint(vm_bp, url_prefix="/api/v1/vms")
