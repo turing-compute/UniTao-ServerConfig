@@ -46,28 +46,25 @@ def list_images():
     })
 
 
-@image_bp.route("", methods=["POST"])
-def create_image():
-    logger = _get_logger()
+def _ensure_json_body():
+    """Validate Content-Type and parse JSON body. Returns (data, error_response)."""
     if not request.is_json:
-        return jsonify({
+        return None, jsonify({
             "success": False,
             "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
         }), 400
-
     data = request.get_json()
     if data is None:
-        return jsonify({
+        return None, jsonify({
             "success": False,
             "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
         }), 400
+    return data, None, None
 
-    entity_name = data.pop("entityName", None)
-    if entity_name is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "Missing 'entityName' field in request body"}
-        }), 400
+
+def _create_image(entity_name: str, data: dict):
+    """Core image creation logic. entity_name comes from URL path."""
+    logger = _get_logger()
 
     # If imagePath is not specified, auto-generate from imageFileDir.
     if "imagePath" not in data:
@@ -89,6 +86,49 @@ def create_image():
         "success": True,
         "data": {"name": entity_name, "imagePath": image.ImagePath()}
     }), status_code
+
+
+@image_bp.route("/<name>", methods=["POST"])
+def create_image_with_name(name: str):
+    """Create an image. Entity name comes from the URL path.
+
+    Request body (sample: plan/rest/data/download_image_sample.json):
+        {
+            "imageFormat": "qcow2",
+            "imageSource": "remote",
+            "downloadLink": "https://..."
+        }
+    """
+    data, err, code = _ensure_json_body()
+    if data is None:
+        return err, code
+
+    # Do NOT accept entityName in body when name is in URL.
+    if "entityName" in data:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                       "message": "'entityName' must come from URL path, not request body"}
+        }), 400
+
+    return _create_image(name, data)
+
+
+@image_bp.route("", methods=["POST"])
+def create_image():
+    """Create an image (backward-compatible). Entity name in request body."""
+    data, err, code = _ensure_json_body()
+    if data is None:
+        return err, code
+
+    entity_name = data.pop("entityName", None)
+    if entity_name is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR", "message": "Missing 'entityName' field in request body"}
+        }), 400
+
+    return _create_image(entity_name, data)
 
 
 @image_bp.route("/<name>", methods=["GET"])

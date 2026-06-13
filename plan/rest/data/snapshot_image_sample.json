@@ -1,0 +1,7 @@
+{
+    "imageFormat": "qcow2",
+    "imageSource": "local",
+    "baseImagePath": "ubuntu-2204-server.qcow2",
+    "baseImageFormat": "qcow2",
+    "sizeInGB": 20
+}

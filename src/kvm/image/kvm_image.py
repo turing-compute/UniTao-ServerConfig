@@ -7,6 +7,7 @@
 #########################################################################################
 
 import argparse
+import json
 import logging
 import os
 from extlib import wget
@@ -141,6 +142,19 @@ class KvmImage:
         self.log.info(f"Download image [{image_path}] from [{download_link}]")
         wget.download(url=download_link, out=image_path)
 
+    def _query_virtual_size_gb(self, image_path: str) -> int:
+        """Query virtual disk size in GB from an existing image file (round up)."""
+        cmd = f"qemu-img info --output=json {image_path}"
+        result = Util.run_command(cmd)
+        info = json.loads(result.stdout)
+        virtual_size_bytes = info.get("virtual-size", 0)
+        return (virtual_size_bytes + 1024**3 - 1) // 1024**3
+
+    def _save_data(self):
+        """Persist current ImageData back to the JSON data file."""
+        with open(self.DataPath, "w") as f:
+            json.dump(self.ImageData, f, indent=4)
+
     def BuildImage(self):
         if self.ImageData[self.Keyword.ImageSource] != self.Keyword.Source.Local:
             return
@@ -154,6 +168,11 @@ class KvmImage:
             cmd = f"{cmd} -b {base_image_path} -F {KvmImage.ImageFormatCmd(base_image_format)}"
         cmd = f"{cmd} {image_path}"
         image_size = self.ImageData.get(self.Keyword.SizeInGB, None)
+        if image_size is None and base_image_path is not None:
+            image_size = self._query_virtual_size_gb(base_image_path)
+            self.ImageData[self.Keyword.SizeInGB] = image_size
+            self._save_data()
+            self.log.info(f"Auto-fill [{self.Keyword.SizeInGB}]={image_size} from backing file")
         if image_size is not None:
             self.log.info(f"Define image size to {image_size}G")
             cmd = f"{cmd} {image_size}G"
