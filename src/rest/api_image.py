@@ -182,19 +182,24 @@ def get_image(name: str):
             if ext in (".qcow2", ".img", ".raw") and base == base_name:
                 file_path = os.path.join(image_dir, f)
                 size = os.path.getsize(file_path)
+                # Convert to relative path based on imageDataDir.
+                try:
+                    image_path = os.path.relpath(file_path, get_data_dir(current_app, "image"))
+                except ValueError:
+                    image_path = file_path
                 result = {
                     "id": base_name,
                     "name": base_name,
                     "managed": False,
                     "file": f,
-                    "path": file_path,
-                    "sizeBytes": size,
+                    "imagePath": image_path,
+                    "sizeInGB": (size + 1024**3 - 1) // 1024**3,
                 }
-                # Detect backing file for qcow2 images.
-                if ext == ".qcow2":
-                    qinfo = _get_qcow2_info(file_path, get_data_dir(current_app, "image"))
-                    if qinfo is not None:
-                        result.update(qinfo)
+                # Detect image format and backing file info (overwrites sizeInGB
+                # with more accurate virtual-size when qemu-img info succeeds).
+                qinfo = _get_qcow2_info(file_path, get_data_dir(current_app, "image"))
+                if qinfo is not None:
+                    result.update(qinfo)
                 return jsonify({"success": True, "data": result})
 
     return jsonify({
