@@ -7,7 +7,7 @@ from extlib.flask import Flask, jsonify
 
 from shared.logger import Log
 from rest.api_vm import vm_bp
-from rest.api_image import image_bp
+from rest.api_image import image_bp, recover_stale_images
 from rest.api_bridge import bridge_bp
 from rest.api_utils import utils_bp
 
@@ -49,6 +49,8 @@ def create_app(config: dict = None) -> Flask:
     _ensure_data_dirs(config)
 
     app = Flask(__name__)
+    app.config["CONFIG"] = config
+    recover_stale_images(app)
     app.config["CONFIG"] = config
     app.config["JSONIFY_PRETTYPRINT_REGULAR"] = True
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 
 from extlib.flask import Blueprint, request, jsonify, current_app
 
@@ -14,6 +15,33 @@ image_bp = Blueprint("image", __name__)
 
 def _get_logger() -> logging.Logger:
     return Log.get_logger("REST-Image")
+
+
+def recover_stale_images(app):
+    """On startup, reset any 'in-progress' downloads to 'failed'.
+
+    A service restart means background download threads are dead,
+    so 'in-progress' is no longer accurate.
+    """
+    logger = _get_logger()
+    image_data_dir = get_data_dir(app, "image")
+    if not os.path.isdir(image_data_dir):
+        return
+    for f in sorted(os.listdir(image_data_dir)):
+        if not f.endswith(".json"):
+            continue
+        file_path = os.path.join(image_data_dir, f)
+        try:
+            with open(file_path, "r") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        if data.get("downloadState") == "in-progress":
+            data["downloadState"] = "failed"
+            with open(file_path, "w") as fh:
+                json.dump(data, fh, indent=4)
+            image_id = f[:-5]
+            logger.info(f"Recovered stale image [{image_id}]: in-progress → failed")
 
 
 @image_bp.route("", methods=["GET"])
@@ -89,8 +117,34 @@ def _ensure_json_body():
     return data, None, None
 
 
+def _run_image_create(data_file_path: str, image_id: str):
+    """Background thread: download/build image, then persist final downloadState."""
+    logger = _get_logger()
+    try:
+        image = KvmImage(data_file_path, logger)
+        image.Create()
+        download_state = "ready"
+    except Exception as e:
+        logger.error(f"Image [{image_id}] create failed: {e}")
+        download_state = "failed"
+
+    # Update persisted downloadState in the JSON data file.
+    try:
+        with open(data_file_path, "r") as f:
+            persisted = json.load(f)
+    except Exception:
+        persisted = {}
+    persisted["downloadState"] = download_state
+    with open(data_file_path, "w") as f:
+        json.dump(persisted, f, indent=4)
+
+
 def _create_image(id: str, data: dict):
-    """Core image creation logic. id comes from URL path."""
+    """Core image creation logic. id comes from URL path.
+
+    Returns 202 Accepted immediately; download/build runs in background.
+    Client polls GET /api/v1/images/<id> to check downloadState.
+    """
     logger = _get_logger()
 
     # If imagePath is not specified, auto-generate relative to imageDataDir.
@@ -115,38 +169,21 @@ def _create_image(id: str, data: dict):
             os.remove(prev_abs_image_path)
             logger.info(f"Removed partial file [{prev_abs_image_path}] from failed download")
 
-    # Mark in-progress before starting the potentially long operation.
+    # Mark in-progress, spawn background download.
     data["downloadState"] = "in-progress"
     write_entity_data(current_app, "image", id, data)
-    logger.info(f"Create image [{id}] from [{image_path}]")
+    logger.info(f"Create image [{id}] — spawning background thread")
 
-    image = KvmImage(image_path, logger)
-    try:
-        image.Create()
-        download_state = "ready"
-    except Exception:
-        # Persist failed state before re-raising.
-        persisted = read_entity_data(current_app, "image", id) or {}
-        persisted["downloadState"] = "failed"
-        write_entity_data(current_app, "image", id, persisted)
-        raise
+    threading.Thread(
+        target=_run_image_create,
+        args=(image_path, id),
+        daemon=True
+    ).start()
 
-    # Persist ready state (KvmImage._save_data may have overwritten the file).
-    persisted = read_entity_data(current_app, "image", id) or {}
-    persisted["downloadState"] = download_state
-    write_entity_data(current_app, "image", id, persisted)
-
-    # Return imagePath relative to imageDataDir.
-    image_data_dir = get_data_dir(current_app, "image")
-    try:
-        rel_image_path = os.path.relpath(image.ImagePath(), image_data_dir)
-    except ValueError:
-        rel_image_path = image.ImagePath()
-
-    status_code = 200 if already_exists else 201
+    status_code = 200 if already_exists else 202
     return jsonify({
         "success": True,
-        "data": {"name": id, "imagePath": rel_image_path, "downloadState": download_state}
+        "data": {"name": id, "imagePath": data["imagePath"], "downloadState": "in-progress"}
     }), status_code
 
 
