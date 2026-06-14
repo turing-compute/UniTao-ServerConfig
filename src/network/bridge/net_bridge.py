@@ -109,6 +109,49 @@ class NetBridge:
                 pass
 
         return sorted(bridges.values(), key=lambda b: b["name"])
+
+    @staticmethod
+    def get_live_state(bridge_name: str, bridge_type: str) -> dict:
+        """Query the system for current interfaces and MAC of a bridge.
+
+        Returns dict with 'interfaces' and 'macAddress' (may be None).
+        Does NOT require a JSON data file — reads live system state.
+        """
+        result = {"interfaces": [], "macAddress": None}
+
+        # ── Interfaces ──
+        try:
+            if bridge_type == NetBridge.Keyword.BridgeTypes.LinuxBridge:
+                r = Util.run_command(f"brctl show {bridge_name}")
+                for line in r.stdout_lines[1:]:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    if parts[0] == bridge_name and len(parts) > 3:
+                        result["interfaces"].append(parts[3])
+                    elif parts[0] != bridge_name:
+                        result["interfaces"].append(parts[0])
+            elif bridge_type == NetBridge.Keyword.BridgeTypes.OvsBridge:
+                r = Util.run_command(f"ovs-vsctl list-ports {bridge_name}")
+                result["interfaces"] = [line for line in r.stdout_lines if line]
+        except Exception:
+            pass
+
+        # ── MAC address ──
+        try:
+            r = Util.run_command(f"ip link show {bridge_name}")
+            for line in r.stdout_lines:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] == "link/ether":
+                    result["macAddress"] = parts[1].lower()
+                    break
+        except Exception:
+            pass
+
+        return result
+
+    @staticmethod
+    def parse_args() -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=f"Linux Network Bridge Operations")
         parser.add_argument("--path", type=str, help=f"Linux Network Bridge Data Path for Vm Operation", required=True)
         args = parser.parse_args()

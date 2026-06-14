@@ -3,7 +3,7 @@ import logging
 from extlib.flask import Blueprint, request, jsonify, current_app
 
 from shared.logger import Log
-from rest.service import list_entities, read_entity_data, write_entity_data, delete_entity, get_entity_path, get_data_dir
+from rest.service import list_entities, read_entity_data, write_entity_data, delete_entity, get_entity_path
 from network.bridge.net_bridge import NetBridge
 
 bridge_bp = Blueprint("bridge", __name__)
@@ -87,11 +87,33 @@ def create_bridge():
 def get_bridge(name: str):
     data = read_entity_data(current_app, "bridge", name)
     if data is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"Bridge '{name}' not found"}
-        }), 404
+        # Check system bridges — maybe it exists but has no JSON definition yet.
+        discovered = NetBridge.discover_system_bridges()
+        for br in discovered:
+            if br["name"] == name:
+                data = {
+                    "bridgeType": br["bridgeType"],
+                    "interfaces": br.get("interfaces", []),
+                }
+                if br.get("macAddress"):
+                    data["macAddress"] = br["macAddress"]
+                break
+        if data is None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "NOT_FOUND", "message": f"Bridge '{name}' not found"}
+            }), 404
+
     data["id"] = name
+
+    # Overlay live system state for interfaces and MAC.
+    br_type = data.get("bridgeType")
+    if br_type:
+        live = NetBridge.get_live_state(name, br_type)
+        data["interfaces"] = live["interfaces"]
+        if live["macAddress"]:
+            data["macAddress"] = live["macAddress"]
+
     return jsonify({
         "success": True,
         "data": data
