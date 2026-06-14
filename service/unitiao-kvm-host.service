@@ -5,6 +5,7 @@ After=network.target libvirtd.service
 [Service]
 Type=simple
 User=root
+WorkingDirectory={{REPO_ROOT}}
 ExecStart={{REPO_ROOT}}/src/runpy.sh src/rest/app.py --config {{CONFIG_DIR}}/config.json
 Restart=on-failure
 RestartSec=5
