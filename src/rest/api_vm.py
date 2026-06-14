@@ -381,3 +381,60 @@ def stop_vm(name: str):
         "success": True,
         "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Stopped}
     })
+
+
+@vm_bp.route("", methods=["PATCH"])
+def patch_vm():
+    """Patch a VM's state (start/stop). Request body per vm_patch_sample.json."""
+    logger = _get_logger()
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
+        }), 400
+
+    data = request.get_json()
+    if data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
+        }), 400
+
+    vm_id = data.get("id", None)
+    vm_state = data.get("vmState", None)
+
+    if vm_id is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR", "message": "Missing required field 'id'"}
+        }), 400
+    if vm_state is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR", "message": "Missing required field 'vmState'"}
+        }), 400
+    if vm_state not in (KvmVm.Keyword.VmStates.Running, KvmVm.Keyword.VmStates.Stopped):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": f"'vmState' must be '{KvmVm.Keyword.VmStates.Running}' or '{KvmVm.Keyword.VmStates.Stopped}'"}
+        }), 400
+
+    vm_data = read_entity_data(current_app, "vm", vm_id)
+    if vm_data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{vm_id}' not found"}
+        }), 404
+
+    vm_data["vmState"] = vm_state
+    write_entity_data(current_app, "vm", vm_id, vm_data)
+
+    vm = KvmVm(logger, vm_json_path(current_app, vm_id))
+    vm.sync_vm_state()
+
+    logger.info(f"Patch VM [{vm_id}] vmState → {vm_state}")
+    return jsonify({
+        "success": True,
+        "data": {"name": vm_id, "vmState": vm_state}
+    })
