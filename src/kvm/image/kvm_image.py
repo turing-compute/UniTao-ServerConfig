@@ -7,9 +7,11 @@
 #########################################################################################
 
 import argparse
+import json
 import logging
 import os
-from extlib import wget
+import time
+import urllib.request
 
 from shared.utilities import Util
 from shared.logger import Log
@@ -60,15 +62,17 @@ class KvmImage:
         elif image_format == KvmImage.Keyword.Formats.QCOW2:
             return "qcow2"
 
-    def __init__(self, data_path:str, logger: logging.Logger):
+    def __init__(self, data_path:str, logger: logging.Logger, progress_callback=None):
+        """progress_callback(tmp_path, current_size, total_size) — called during remote download."""
         self.log = logger
+        self.progress_callback = progress_callback
         self.DataPath = data_path
         if self.DataPath is None:
             args = KvmImage.parse_args()
             self.DataPath = args.path
         if not os.path.exists(self.DataPath):
             raise ValueError(f"Invalid path does not exists.[{self.DataPath}]")
-            
+
         self.ImagName = Util.file_data_name(self.DataPath)
         self.ImageData = Util.read_json_file(self.DataPath)
         self.Validate()
@@ -138,8 +142,53 @@ class KvmImage:
             cmd = f"mkdir -p {image_dir}"
             Util.run_command(cmd)
         download_link = self.ImageData[self.Keyword.DownloadLink]
-        self.log.info(f"Download image [{image_path}] from [{download_link}]")
-        wget.download(url=download_link, out=image_path)
+        tmp_path = image_path + ".tmp"
+        self.log.info(f"Download image [{image_path}] from [{download_link}] to temp [{tmp_path}]")
+
+        last_cb_time = [0.0]  # mutable container for closure
+
+        def reporthook(blocks, block_size, total_size):
+            current_size = blocks * block_size
+            if self.progress_callback is not None:
+                now = time.time()
+                if now - last_cb_time[0] >= 1.0:
+                    last_cb_time[0] = now
+                    self.progress_callback(tmp_path, current_size, total_size)
+
+        try:
+            urllib.request.urlretrieve(download_link, tmp_path, reporthook)
+            os.rename(tmp_path, image_path)
+            self.log.info(f"Download complete, renamed [{tmp_path}] -> [{image_path}]")
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                self.log.info(f"Download failed, removed temp file [{tmp_path}]")
+            raise
+
+    def _query_virtual_size_gb(self, image_path: str) -> int:
+        """Query virtual disk size in GB from an existing image file (round up)."""
+        cmd = f"qemu-img info --output=json {image_path}"
+        result = Util.run_command(cmd)
+        info = json.loads(result.stdout)
+        virtual_size_bytes = info.get("virtual-size", 0)
+        return (virtual_size_bytes + 1024**3 - 1) // 1024**3
+
+    def _save_data(self):
+        """Persist current ImageData back to the JSON data file.
+
+        Paths are converted to relative (based on the data file's directory)
+        so the JSON remains portable across filesystem moves.
+        """
+        data_dir = os.path.dirname(self.DataPath)
+        save_data = dict(self.ImageData)
+        for key in (self.Keyword.ImagePath, self.Keyword.BaseImagePath):
+            if save_data.get(key):
+                try:
+                    save_data[key] = os.path.relpath(save_data[key], data_dir)
+                except ValueError:
+                    pass
+        with open(self.DataPath, "w") as f:
+            json.dump(save_data, f, indent=4)
 
     def BuildImage(self):
         if self.ImageData[self.Keyword.ImageSource] != self.Keyword.Source.Local:
@@ -154,6 +203,11 @@ class KvmImage:
             cmd = f"{cmd} -b {base_image_path} -F {KvmImage.ImageFormatCmd(base_image_format)}"
         cmd = f"{cmd} {image_path}"
         image_size = self.ImageData.get(self.Keyword.SizeInGB, None)
+        if image_size is None and base_image_path is not None:
+            image_size = self._query_virtual_size_gb(base_image_path)
+            self.ImageData[self.Keyword.SizeInGB] = image_size
+            self._save_data()
+            self.log.info(f"Auto-fill [{self.Keyword.SizeInGB}]={image_size} from backing file")
         if image_size is not None:
             self.log.info(f"Define image size to {image_size}G")
             cmd = f"{cmd} {image_size}G"

@@ -1,0 +1,4 @@
+{
+    "id": "[comment: vm_id to perform ops on]",
+    "vmState": "[comment: expected vm state. running or stopped]"
+}

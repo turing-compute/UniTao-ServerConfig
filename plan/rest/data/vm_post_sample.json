@@ -1,0 +1,11 @@
+{
+    "id": "sample_wireguard",
+    "cpu": 2,
+    "ramInGB": 2,
+    "vmHostName":"wireguard01",
+    "ipv4": "192.168.2.104/24",
+    "gateway4": "192.168.2.1",
+    "osImage": "wireguard-01",
+    "osVariant": "ubuntu24.04",
+    "bridge": "ovs-br0"
+}
