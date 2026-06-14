@@ -33,7 +33,82 @@ class NetBridge:
                 ]
     
     @staticmethod
-    def parse_args() -> argparse.Namespace:
+    def discover_system_bridges(logger: logging.Logger = None) -> list:
+        """Discover existing bridges on the system (OVS and brctl).
+
+        Returns a list of dicts, each with:
+            name, bridgeType, interfaces, macAddress (optional)
+        """
+        bridges = {}
+
+        # ── OVS bridges ──
+        try:
+            result = Util.run_command("ovs-vsctl list-br")
+            for br_name in result.stdout_lines:
+                if br_name:
+                    bridges[br_name] = {
+                        "name": br_name,
+                        "bridgeType": NetBridge.Keyword.BridgeTypes.OvsBridge,
+                        "interfaces": [],
+                    }
+        except Exception:
+            pass
+
+        # ── Linux bridges ──
+        try:
+            result = Util.run_command("brctl show")
+            lines = result.stdout_lines
+            current_bridge = None
+            for line in lines:
+                if not line.strip():
+                    continue
+                if not line.startswith("\t") and not line.startswith(" "):
+                    # Bridge name line — first word is the bridge name.
+                    parts = line.split()
+                    current_bridge = parts[0]
+                    # Skip the header line.
+                    if current_bridge == "bridge" and "name" in line:
+                        current_bridge = None
+                        continue
+                    if current_bridge not in bridges:
+                        bridges[current_bridge] = {
+                            "name": current_bridge,
+                            "bridgeType": NetBridge.Keyword.BridgeTypes.LinuxBridge,
+                            "interfaces": [],
+                        }
+                elif current_bridge:
+                    # Interface line — last word is the interface name.
+                    parts = line.split()
+                    if parts:
+                        iface = parts[-1]
+                        if iface and iface != current_bridge:
+                            bridges[current_bridge]["interfaces"].append(iface)
+        except Exception:
+            pass
+
+        # ── Enrich with interfaces for OVS bridges ──
+        for br_name, br_data in list(bridges.items()):
+            if br_data["bridgeType"] == NetBridge.Keyword.BridgeTypes.OvsBridge:
+                try:
+                    result = Util.run_command(f"ovs-vsctl list-ports {br_name}")
+                    br_data["interfaces"] = [line for line in result.stdout_lines if line]
+                except Exception:
+                    pass
+
+        # ── Enrich with MAC addresses ──
+        for br_name, br_data in bridges.items():
+            try:
+                result = Util.run_command(f"ip link show {br_name}")
+                # MAC is on the first line after "link/ether".
+                for line in result.stdout_lines:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[0] == "link/ether":
+                        br_data["macAddress"] = parts[1].lower()
+                        break
+            except Exception:
+                pass
+
+        return sorted(bridges.values(), key=lambda b: b["name"])
         parser = argparse.ArgumentParser(description=f"Linux Network Bridge Operations")
         parser.add_argument("--path", type=str, help=f"Linux Network Bridge Data Path for Vm Operation", required=True)
         args = parser.parse_args()

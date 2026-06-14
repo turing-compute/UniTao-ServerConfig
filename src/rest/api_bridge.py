@@ -3,7 +3,7 @@ import logging
 from extlib.flask import Blueprint, request, jsonify, current_app
 
 from shared.logger import Log
-from rest.service import list_entities, read_entity_data, write_entity_data, delete_entity, get_entity_path
+from rest.service import list_entities, read_entity_data, write_entity_data, delete_entity, get_entity_path, get_data_dir
 from network.bridge.net_bridge import NetBridge
 
 bridge_bp = Blueprint("bridge", __name__)
@@ -15,11 +15,33 @@ def _get_logger() -> logging.Logger:
 
 @bridge_bp.route("", methods=["GET"])
 def list_bridges():
-    names = list_entities(current_app, "bridge")
+    logger = _get_logger()
+    managed_names = set(list_entities(current_app, "bridge"))
+
+    # Discover system bridges and auto-create JSON definitions for unmanaged ones.
+    discovered = NetBridge.discover_system_bridges(logger)
+    for br in discovered:
+        if br["name"] not in managed_names:
+            _auto_create_bridge_json(br, logger)
+
+    all_names = list_entities(current_app, "bridge")
     return jsonify({
         "success": True,
-        "data": {"bridges": names}
+        "data": {"bridges": all_names}
     })
+
+
+def _auto_create_bridge_json(br: dict, logger: logging.Logger):
+    """Auto-create a JSON definition file for an unmanaged system bridge."""
+    data = {
+        "bridgeType": br["bridgeType"],
+        "interfaces": br.get("interfaces", []),
+    }
+    if br.get("macAddress"):
+        data["macAddress"] = br["macAddress"]
+    write_entity_data(current_app, "bridge", br["name"], data)
+    logger.info(f"Auto-created bridge definition [{br['name']}] type=[{br['bridgeType']}] "
+                f"interfaces={data['interfaces']}")
 
 
 @bridge_bp.route("", methods=["POST"])
