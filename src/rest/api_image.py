@@ -39,10 +39,24 @@ def recover_stale_images(app):
             continue
         dl_state = data.get("downloadState")
         if dl_state == "in-progress" or isinstance(dl_state, dict):
+            image_id = f[:-5]
+            # Clean up any temporary download file.
+            tmp_path = None
+            if isinstance(dl_state, dict) and dl_state.get("tempFilePath"):
+                tmp_path = dl_state["tempFilePath"]
+                if not os.path.isabs(tmp_path):
+                    tmp_path = os.path.normpath(os.path.join(image_data_dir, tmp_path))
+            elif data.get("imagePath"):
+                # Old-format "in-progress": reconstruct temp path.
+                abs_image = os.path.normpath(os.path.join(image_data_dir, data["imagePath"]))
+                tmp_path = abs_image + ".tmp"
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                logger.info(f"Removed stale temp file [{tmp_path}] for [{image_id}]")
+
             data["downloadState"] = "failed"
             with open(file_path, "w") as fh:
                 json.dump(data, fh, indent=4)
-            image_id = f[:-5]
             logger.info(f"Recovered stale image [{image_id}]: in-progress → failed")
 
 
