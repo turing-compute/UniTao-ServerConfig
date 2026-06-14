@@ -151,9 +151,21 @@ class KvmImage:
         return (virtual_size_bytes + 1024**3 - 1) // 1024**3
 
     def _save_data(self):
-        """Persist current ImageData back to the JSON data file."""
+        """Persist current ImageData back to the JSON data file.
+
+        Paths are converted to relative (based on the data file's directory)
+        so the JSON remains portable across filesystem moves.
+        """
+        data_dir = os.path.dirname(self.DataPath)
+        save_data = dict(self.ImageData)
+        for key in (self.Keyword.ImagePath, self.Keyword.BaseImagePath):
+            if save_data.get(key):
+                try:
+                    save_data[key] = os.path.relpath(save_data[key], data_dir)
+                except ValueError:
+                    pass
         with open(self.DataPath, "w") as f:
-            json.dump(self.ImageData, f, indent=4)
+            json.dump(save_data, f, indent=4)
 
     def BuildImage(self):
         if self.ImageData[self.Keyword.ImageSource] != self.Keyword.Source.Local:

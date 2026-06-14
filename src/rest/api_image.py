@@ -93,25 +93,60 @@ def _create_image(id: str, data: dict):
     """Core image creation logic. id comes from URL path."""
     logger = _get_logger()
 
-    # If imagePath is not specified, auto-generate from imageFileDir.
+    # If imagePath is not specified, auto-generate relative to imageDataDir.
     if "imagePath" not in data:
         image_format = data.get("imageFormat", "qcow2")
         ext = ".img" if image_format == "img" else ".qcow2"
-        data["imagePath"] = os.path.join(get_image_file_dir(current_app), f"{id}{ext}")
+        abs_image_path = os.path.join(get_image_file_dir(current_app), f"{id}{ext}")
+        try:
+            data["imagePath"] = os.path.relpath(abs_image_path, get_data_dir(current_app, "image"))
+        except ValueError:
+            data["imagePath"] = abs_image_path
 
     image_path = get_entity_path(current_app, "image", id)
-    already_exists = read_entity_data(current_app, "image", id) is not None
+    prev_data = read_entity_data(current_app, "image", id)
+    already_exists = prev_data is not None
 
+    # If previous download failed, clean up partial file so KvmImage re-downloads.
+    if prev_data and prev_data.get("downloadState") == "failed" and prev_data.get("imagePath"):
+        prev_image_data_dir = get_data_dir(current_app, "image")
+        prev_abs_image_path = os.path.normpath(os.path.join(prev_image_data_dir, prev_data["imagePath"]))
+        if os.path.exists(prev_abs_image_path):
+            os.remove(prev_abs_image_path)
+            logger.info(f"Removed partial file [{prev_abs_image_path}] from failed download")
+
+    # Mark in-progress before starting the potentially long operation.
+    data["downloadState"] = "in-progress"
     write_entity_data(current_app, "image", id, data)
     logger.info(f"Create image [{id}] from [{image_path}]")
 
     image = KvmImage(image_path, logger)
-    image.Create()
+    try:
+        image.Create()
+        download_state = "ready"
+    except Exception:
+        # Persist failed state before re-raising.
+        persisted = read_entity_data(current_app, "image", id) or {}
+        persisted["downloadState"] = "failed"
+        write_entity_data(current_app, "image", id, persisted)
+        raise
+
+    # Persist ready state (KvmImage._save_data may have overwritten the file).
+    persisted = read_entity_data(current_app, "image", id) or {}
+    persisted["downloadState"] = download_state
+    write_entity_data(current_app, "image", id, persisted)
+
+    # Return imagePath relative to imageDataDir.
+    image_data_dir = get_data_dir(current_app, "image")
+    try:
+        rel_image_path = os.path.relpath(image.ImagePath(), image_data_dir)
+    except ValueError:
+        rel_image_path = image.ImagePath()
 
     status_code = 200 if already_exists else 201
     return jsonify({
         "success": True,
-        "data": {"name": id, "imagePath": image.ImagePath()}
+        "data": {"name": id, "imagePath": rel_image_path, "downloadState": download_state}
     }), status_code
 
 
@@ -172,6 +207,21 @@ def get_image(name: str):
     if data is not None:
         data["id"] = base_name
         data["managed"] = True
+        # Convert imagePath to relative if stored as absolute.
+        if data.get("imagePath") and os.path.isabs(data["imagePath"]):
+            try:
+                data["imagePath"] = os.path.relpath(
+                    data["imagePath"], get_data_dir(current_app, "image"))
+            except ValueError:
+                pass
+        # downloadState: from persisted data; fall back to file check.
+        if "downloadState" not in data:
+            if data.get("imagePath"):
+                image_data_dir = get_data_dir(current_app, "image")
+                abs_image_path = os.path.normpath(os.path.join(image_data_dir, data["imagePath"]))
+                data["downloadState"] = "ready" if os.path.exists(abs_image_path) else "in-progress"
+            else:
+                data["downloadState"] = "in-progress"
         return jsonify({"success": True, "data": data})
 
     # Fallback: look for an unmanaged disk image file.
