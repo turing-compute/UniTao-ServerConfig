@@ -34,9 +34,19 @@ def load_config(config_path: str = None) -> dict:
     return config
 
 
+def _ensure_data_dirs(config: dict):
+    """Create data directories from config if they don't exist."""
+    for key in _DIR_KEYS:
+        d = config.get(key)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+
+
 def create_app(config: dict = None) -> Flask:
     if config is None:
         config = load_config()
+
+    _ensure_data_dirs(config)
 
     app = Flask(__name__)
     app.config["CONFIG"] = config
