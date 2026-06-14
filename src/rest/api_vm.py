@@ -353,7 +353,7 @@ def start_vm(name: str):
     write_entity_data(current_app, "vm", name, data)
 
     vm = KvmVm(logger, vm_json_path(current_app, name))
-    vm.sync_vm_state()
+    vm.Process()
 
     return jsonify({
         "success": True,
@@ -375,7 +375,7 @@ def stop_vm(name: str):
     write_entity_data(current_app, "vm", name, data)
 
     vm = KvmVm(logger, vm_json_path(current_app, name))
-    vm.sync_vm_state()
+    vm.Process()
 
     return jsonify({
         "success": True,
@@ -431,7 +431,7 @@ def patch_vm():
     write_entity_data(current_app, "vm", vm_id, vm_data)
 
     vm = KvmVm(logger, vm_json_path(current_app, vm_id))
-    vm.sync_vm_state()
+    vm.Process()
 
     logger.info(f"Patch VM [{vm_id}] vmState → {vm_state}")
     return jsonify({
