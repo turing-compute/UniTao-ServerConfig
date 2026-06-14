@@ -8,7 +8,7 @@ from extlib.flask import Blueprint, request, jsonify, current_app
 from shared.logger import Log
 from shared.utilities import Util
 from rest.service import (
-    list_entities, read_entity_data, write_entity_data,
+    list_entities, read_entity_data, write_entity_data, delete_entity,
     vm_dir, vm_data_dir, vm_json_path, get_data_dir, get_image_file_dir,
 )
 from kvm.vm.kvm_vm import KvmVm
@@ -42,42 +42,94 @@ def _get_virsh_state(vm_name: str) -> str:
         return "unknown"
 
 
-# ── JSON generators (simple params → full definition files) ──
+# ── JSON generators (POST params → definition files per vm_data_sample.json) ──
 
-def _gen_disk_json(name: str, os_size: int, config: dict) -> dict:
-    vm_root = os.path.join(config["vmDataDir"], name)
+def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: logging.Logger) -> dict:
+    """Generate a disk JSON that references an existing managed image as backing file."""
+    base_image_path_rel = base_image_data.get("imagePath", "")
+    image_format = base_image_data.get("imageFormat", "qcow2")
+    disk_name = os.path.splitext(os.path.basename(base_image_path_rel))[0]
+    disk_filename = f"{disk_name}.qcow2"
+    disk_image_path = os.path.join(vm_root, disk_filename)
+
+    # Try to read virtual size from the base image file.
+    size_gb = 20  # fallback default
+    if base_image_path_rel:
+        image_data_dir = get_data_dir(current_app, "image")
+        abs_base_path = os.path.normpath(os.path.join(image_data_dir, base_image_path_rel))
+        if os.path.exists(abs_base_path):
+            size_gb = _query_virtual_size_gb(abs_base_path, logger)
+
+    # Store paths relative to the disk JSON's own directory.
+    data_dir = os.path.join(vm_root, "data")
+    try:
+        image_path_rel = os.path.relpath(disk_image_path, data_dir)
+    except ValueError:
+        image_path_rel = disk_image_path
+    try:
+        base_rel = os.path.relpath(abs_base_path, data_dir) if base_image_path_rel else base_image_path_rel
+    except (ValueError, UnboundLocalError):
+        base_rel = base_image_path_rel
+
     return {
-        "imagePath": os.path.join(vm_root, f"{name}.qcow2"),
+        "imagePath": image_path_rel,
         "imageSource": "local",
-        "imageFormat": "qcow2",
-        "sizeInGB": os_size,
+        "imageFormat": image_format,
+        "sizeInGB": size_gb,
+        "baseImagePath": base_rel,
+        "baseImageFormat": image_format,
     }
 
 
-def _gen_net_json(config: dict) -> dict:
-    return {
+def _gen_net_json(bridge_name: str, bridge_data: dict, static_ip4: str = None, gateway4: str = None) -> dict:
+    """Generate a network interface JSON connected to a managed bridge."""
+    use_dhcp = static_ip4 is None
+    net = {
         "ifaceType": "bridge",
-        "bridgeName": config["defaultBridge"],
-        "bridgeType": "linuxBridge",
+        "bridgeName": bridge_name,
+        "bridgeType": bridge_data.get("bridgeType", "linuxBridge"),
         "macAddress": _random_mac(),
-        "useDHCP4": True,
+        "useDHCP4": use_dhcp,
     }
+    if not use_dhcp:
+        net["ip4"] = static_ip4
+        if gateway4:
+            net["gateway4"] = gateway4
+    return net
 
 
-def _gen_vm_json(name: str, cpu_number: int, os_name: str, os_size: int, config: dict) -> dict:
-    vm_root = os.path.join(config["vmDataDir"], name)
+def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
+                 vm_host_name: str, vm_root: str,
+                 disk_file_name: str, net_file_name: str) -> dict:
+    """Generate the main VM definition JSON per vm_data_sample.json."""
     return {
+        "id": vm_name,
+        "description": [],
         "vmPath": vm_root,
-        "smp": cpu_number,
-        "ramInGB": config["defaultRamInGB"],
-        "disks": ["{vmPath}/data/disk1.json"],
-        "networks": ["{vmPath}/data/net0.json"],
-        "vmState": "running",
+        "smp": cpu,
+        "ramInGB": ram_gb,
+        "disks": ["{vmPath}/data/" + disk_file_name],
+        "networks": ["{vmPath}/data/" + net_file_name],
+        "vmState": "stopped",
         "useCloudInit": True,
         "ciIsoPath": "{vmPath}/cloud_init.iso",
+        "vmHostName": vm_host_name,
         "osType": "linux",
-        "osVariant": os_name,
+        "osVariant": os_variant,
+        "defaultPWD": "ubuntu",
     }
+
+
+def _query_virtual_size_gb(image_path: str, logger: logging.Logger) -> int:
+    """Query virtual disk size in GB from an existing image file (round up)."""
+    try:
+        result = Util.run_command(f"qemu-img info --output=json {image_path}")
+        info = json.loads(result.stdout)
+        virtual_bytes = info.get("virtual-size", 0)
+        return max(1, (virtual_bytes + 1024**3 - 1) // 1024**3)
+    except Exception:
+        logger.warning(f"Cannot query virtual size for [{image_path}], using fallback")
+        return 20
 
 
 # ── Routes ──
@@ -122,14 +174,21 @@ def create_vm():
             "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
         }), 400
 
-    # Required fields.
-    vm_id = data.get("vm_id", None)
-    cpu_number = data.get("cpu_number", None)
-    os_name = data.get("os_name", None)
-    os_size = data.get("os_size", None)
+    # ── Required fields ──
+    vm_id = data.get("id", None)
+    cpu = data.get("cpu", None)
+    ram_gb = data.get("ramInGB", None)
+    vm_host_name = data.get("vmHostName", None)
+    os_image = data.get("osImage", None)
+    os_variant = data.get("osVariant", None)
+    bridge_name = data.get("bridge", None)
 
-    for field_name, field_val in [("vm_id", vm_id), ("cpu_number", cpu_number),
-                                   ("os_name", os_name), ("os_size", os_size)]:
+    required = [
+        ("id", vm_id), ("cpu", cpu), ("ramInGB", ram_gb),
+        ("vmHostName", vm_host_name), ("osImage", os_image),
+        ("osVariant", os_variant), ("bridge", bridge_name),
+    ]
+    for field_name, field_val in required:
         if field_val is None:
             return jsonify({
                 "success": False,
@@ -137,37 +196,68 @@ def create_vm():
                           "message": f"Missing required field '{field_name}'"}
             }), 400
 
-    if not isinstance(cpu_number, int) or cpu_number < 1:
+    # ── Optional fields ──
+    ipv4 = data.get("ipv4", None)          # static IP in CIDR notation
+    gateway4 = data.get("gateway4", None)  # gateway for static IP
+
+    # ── Validate types ──
+    for field_name, field_val in [("cpu", cpu), ("ramInGB", ram_gb)]:
+        if not isinstance(field_val, int) or field_val < 1:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"'{field_name}' must be a positive integer"}
+            }), 400
+
+    # ── Resolve referenced image ──
+    base_image_data = read_entity_data(current_app, "image", os_image)
+    if base_image_data is None:
         return jsonify({
             "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "'cpu_number' must be a positive integer"}
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": f"Referenced osImage '{os_image}' not found in managed images"}
         }), 400
-
-    if not isinstance(os_size, int) or os_size < 1:
+    if base_image_data.get("downloadState") != "ready":
         return jsonify({
             "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "'os_size' must be a positive integer (GB)"}
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": f"osImage '{os_image}' is not ready (state: {base_image_data.get('downloadState')})"}
         }), 400
 
-    config = _get_config()
+    # ── Resolve referenced bridge ──
+    bridge_data = read_entity_data(current_app, "bridge", bridge_name)
+    if bridge_data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": f"Referenced bridge '{bridge_name}' not found in managed bridges"}
+        }), 400
+
+    # ── Build directory structure ──
     already_exists = read_entity_data(current_app, "vm", vm_id) is not None
-
-    # Build directory structure: {vmDataDir}/{vm_id}/data/
+    vm_root = vm_dir(current_app, vm_id)
     data_dir = vm_data_dir(current_app, vm_id)
     os.makedirs(data_dir, exist_ok=True)
 
-    # Generate and write JSON definition files.
-    disk_json = _gen_disk_json(vm_id, os_size, config)
-    disk_path = os.path.join(data_dir, "disk1.json")
+    # ── Generate definition files ──
+    # Disk JSON (named after the base image).
+    disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger)
+    disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
+    disk_file_name = f"{disk_base}.json"
+    disk_path = os.path.join(data_dir, disk_file_name)
     with open(disk_path, "w") as f:
         json.dump(disk_json, f, indent=4)
 
-    net_json = _gen_net_json(config)
-    net_path = os.path.join(data_dir, "net0.json")
+    # Network JSON (named after the bridge).
+    net_json = _gen_net_json(bridge_name, bridge_data, ipv4, gateway4)
+    net_file_name = f"{bridge_name}.json"
+    net_path = os.path.join(data_dir, net_file_name)
     with open(net_path, "w") as f:
         json.dump(net_json, f, indent=4)
 
-    vm_json = _gen_vm_json(vm_id, cpu_number, os_name, os_size, config)
+    # Main VM JSON.
+    vm_json = _gen_vm_json(vm_id, cpu, ram_gb, os_variant, vm_host_name,
+                           vm_root, disk_file_name, net_file_name)
     vm_path = vm_json_path(current_app, vm_id)
     with open(vm_path, "w") as f:
         json.dump(vm_json, f, indent=4)
@@ -177,8 +267,10 @@ def create_vm():
     with open(request_path, "w") as f:
         json.dump(data, f, indent=4)
 
-    logger.info(f"Create VM [{vm_id}] cpu={cpu_number} os={os_name} disk={os_size}GB")
+    logger.info(f"Create VM [{vm_id}] cpu={cpu} ram={ram_gb}GB "
+                f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name}")
 
+    # ── Process (creates virsh VM) ──
     vm = KvmVm(logger, vm_path)
     vm.Process()
 
