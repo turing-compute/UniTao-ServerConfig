@@ -243,14 +243,14 @@ def create_vm():
     # Disk JSON (named after the base image).
     disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger)
     disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
-    disk_file_name = f"{disk_base}.json"
+    disk_file_name = f"disk-{disk_base}.json"
     disk_path = os.path.join(data_dir, disk_file_name)
     with open(disk_path, "w") as f:
         json.dump(disk_json, f, indent=4)
 
     # Network JSON (named after the bridge).
     net_json = _gen_net_json(bridge_name, bridge_data, ipv4, gateway4)
-    net_file_name = f"{bridge_name}.json"
+    net_file_name = f"net-{bridge_name}.json"
     net_path = os.path.join(data_dir, net_file_name)
     with open(net_path, "w") as f:
         json.dump(net_json, f, indent=4)

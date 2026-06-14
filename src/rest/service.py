@@ -43,8 +43,8 @@ def vm_data_dir(app, name: str) -> str:
 
 
 def vm_json_path(app, name: str) -> str:
-    """Return the VM JSON definition file path."""
-    return os.path.join(vm_data_dir(app, name), f"{name}.json")
+    """Return the VM JSON definition file path: {vmDataDir}/{name}/data/vm-{name}.json"""
+    return os.path.join(vm_data_dir(app, name), f"vm-{name}.json")
 
 
 def list_entities(app, data_type: str) -> list:
@@ -55,7 +55,7 @@ def list_entities(app, data_type: str) -> list:
 
 
 def _list_vms(app) -> list:
-    """List VM names: each subdirectory containing data/{name}.json is a VM."""
+    """List VM names: each subdirectory containing data/vm-{name}.json is a VM."""
     parent = get_data_dir(app, "vm")
     if not os.path.isdir(parent):
         return []
@@ -64,7 +64,7 @@ def _list_vms(app) -> list:
         entry_path = os.path.join(parent, entry)
         if not os.path.isdir(entry_path):
             continue
-        vm_file = os.path.join(entry_path, "data", f"{entry}.json")
+        vm_file = os.path.join(entry_path, "data", f"vm-{entry}.json")
         if os.path.isfile(vm_file):
             names.append(entry)
     return sorted(names)
