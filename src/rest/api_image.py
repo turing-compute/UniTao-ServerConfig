@@ -2,12 +2,13 @@ import json
 import logging
 import os
 import threading
+import time
 
 from extlib.flask import Blueprint, request, jsonify, current_app
 
 from shared.logger import Log
 from shared.utilities import Util
-from rest.service import list_entities, read_entity_data, write_entity_data, get_entity_path, get_image_file_dir, get_data_dir
+from rest.service import list_entities, read_entity_data, write_entity_data, get_entity_path, get_image_file_dir, get_data_dir, delete_entity
 from kvm.image.kvm_image import KvmImage
 
 image_bp = Blueprint("image", __name__)
@@ -36,7 +37,8 @@ def recover_stale_images(app):
                 data = json.load(fh)
         except Exception:
             continue
-        if data.get("downloadState") == "in-progress":
+        dl_state = data.get("downloadState")
+        if dl_state == "in-progress" or isinstance(dl_state, dict):
             data["downloadState"] = "failed"
             with open(file_path, "w") as fh:
                 json.dump(data, fh, indent=4)
@@ -120,8 +122,35 @@ def _ensure_json_body():
 def _run_image_create(data_file_path: str, image_id: str):
     """Background thread: download/build image, then persist final downloadState."""
     logger = _get_logger()
+    last_update_sec = [0.0]
+
+    def progress_callback(tmp_path, current_size, total_size):
+        """Persist download progress so GET /api/v1/images/<id> can poll it."""
+        now = time.time()
+        if now - last_update_sec[0] < 1.0:
+            return
+        last_update_sec[0] = now
+        progress_percent = None
+        if total_size > 0:
+            progress_percent = (current_size * 100) // total_size
+        download_state = {
+            "phase": "downloading",
+            "tempFilePath": tmp_path,
+            "tempFileSize": current_size,
+            "totalSize": total_size,
+            "progressPercent": progress_percent,
+        }
+        try:
+            with open(data_file_path, "r") as f:
+                persisted = json.load(f)
+        except Exception:
+            persisted = {}
+        persisted["downloadState"] = download_state
+        with open(data_file_path, "w") as f:
+            json.dump(persisted, f, indent=4)
+
     try:
-        image = KvmImage(data_file_path, logger)
+        image = KvmImage(data_file_path, logger, progress_callback=progress_callback)
         image.Create()
         download_state = "ready"
     except Exception as e:
@@ -161,13 +190,14 @@ def _create_image(id: str, data: dict):
     prev_data = read_entity_data(current_app, "image", id)
     already_exists = prev_data is not None
 
-    # If previous download failed, clean up partial file so KvmImage re-downloads.
+    # If previous download failed, clean up partial files so KvmImage re-downloads.
     if prev_data and prev_data.get("downloadState") == "failed" and prev_data.get("imagePath"):
         prev_image_data_dir = get_data_dir(current_app, "image")
         prev_abs_image_path = os.path.normpath(os.path.join(prev_image_data_dir, prev_data["imagePath"]))
-        if os.path.exists(prev_abs_image_path):
-            os.remove(prev_abs_image_path)
-            logger.info(f"Removed partial file [{prev_abs_image_path}] from failed download")
+        for path in (prev_abs_image_path, prev_abs_image_path + ".tmp"):
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"Removed partial file [{path}] from failed download")
 
     # Mark in-progress, spawn background download.
     data["downloadState"] = "in-progress"
@@ -293,3 +323,53 @@ def get_image(name: str):
         "success": False,
         "error": {"code": "NOT_FOUND", "message": f"Image '{name}' not found"}
     }), 404
+
+
+@image_bp.route("/<name>", methods=["DELETE"])
+def delete_image(name: str):
+    """Delete a managed or unmanaged image (JSON data + disk file)."""
+    logger = _get_logger()
+    base_name = name
+    for ext in (".qcow2", ".img", ".raw"):
+        if name.endswith(ext):
+            base_name = name[:-len(ext)]
+            break
+
+    # Try managed first.
+    data = read_entity_data(current_app, "image", base_name)
+    if data is not None:
+        # Resolve and delete the image file (and any temp file).
+        _remove_image_file(data, base_name, logger)
+        # Delete the JSON data file.
+        delete_entity(current_app, "image", base_name)
+        logger.info(f"Delete managed image [{base_name}]")
+        return jsonify({"success": True, "data": {"name": base_name, "deleted": True}})
+
+    # Try unmanaged: look for the file on disk.
+    image_dir = get_image_file_dir(current_app)
+    if os.path.isdir(image_dir):
+        for f in os.listdir(image_dir):
+            base, ext = os.path.splitext(f)
+            if ext in (".qcow2", ".img", ".raw") and base == base_name:
+                file_path = os.path.join(image_dir, f)
+                os.remove(file_path)
+                logger.info(f"Delete unmanaged image [{base_name}] file [{file_path}]")
+                return jsonify({"success": True, "data": {"name": base_name, "deleted": True}})
+
+    return jsonify({
+        "success": False,
+        "error": {"code": "NOT_FOUND", "message": f"Image '{name}' not found"}
+    }), 404
+
+
+def _remove_image_file(data: dict, image_id: str, logger: logging.Logger):
+    """Resolve imagePath from data and delete the file (and any .tmp file) if they exist."""
+    image_path_rel = data.get("imagePath")
+    if not image_path_rel:
+        return
+    image_data_dir = get_data_dir(current_app, "image")
+    abs_path = os.path.normpath(os.path.join(image_data_dir, image_path_rel))
+    for path in (abs_path, abs_path + ".tmp"):
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"Removed image file [{path}] for [{image_id}]")

@@ -10,7 +10,8 @@ import argparse
 import json
 import logging
 import os
-from extlib import wget
+import time
+import urllib.request
 
 from shared.utilities import Util
 from shared.logger import Log
@@ -61,15 +62,17 @@ class KvmImage:
         elif image_format == KvmImage.Keyword.Formats.QCOW2:
             return "qcow2"
 
-    def __init__(self, data_path:str, logger: logging.Logger):
+    def __init__(self, data_path:str, logger: logging.Logger, progress_callback=None):
+        """progress_callback(tmp_path, current_size, total_size) — called during remote download."""
         self.log = logger
+        self.progress_callback = progress_callback
         self.DataPath = data_path
         if self.DataPath is None:
             args = KvmImage.parse_args()
             self.DataPath = args.path
         if not os.path.exists(self.DataPath):
             raise ValueError(f"Invalid path does not exists.[{self.DataPath}]")
-            
+
         self.ImagName = Util.file_data_name(self.DataPath)
         self.ImageData = Util.read_json_file(self.DataPath)
         self.Validate()
@@ -139,8 +142,28 @@ class KvmImage:
             cmd = f"mkdir -p {image_dir}"
             Util.run_command(cmd)
         download_link = self.ImageData[self.Keyword.DownloadLink]
-        self.log.info(f"Download image [{image_path}] from [{download_link}]")
-        wget.download(url=download_link, out=image_path)
+        tmp_path = image_path + ".tmp"
+        self.log.info(f"Download image [{image_path}] from [{download_link}] to temp [{tmp_path}]")
+
+        last_cb_time = [0.0]  # mutable container for closure
+
+        def reporthook(blocks, block_size, total_size):
+            current_size = blocks * block_size
+            if self.progress_callback is not None:
+                now = time.time()
+                if now - last_cb_time[0] >= 1.0:
+                    last_cb_time[0] = now
+                    self.progress_callback(tmp_path, current_size, total_size)
+
+        try:
+            urllib.request.urlretrieve(download_link, tmp_path, reporthook)
+            os.rename(tmp_path, image_path)
+            self.log.info(f"Download complete, renamed [{tmp_path}] -> [{image_path}]")
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                self.log.info(f"Download failed, removed temp file [{tmp_path}]")
+            raise
 
     def _query_virtual_size_gb(self, image_path: str) -> int:
         """Query virtual disk size in GB from an existing image file (round up)."""
