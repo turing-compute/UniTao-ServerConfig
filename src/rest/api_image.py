@@ -1,10 +1,12 @@
+import json
 import logging
 import os
 
 from extlib.flask import Blueprint, request, jsonify, current_app
 
 from shared.logger import Log
-from rest.service import list_entities, read_entity_data, write_entity_data, get_entity_path, get_image_file_dir
+from shared.utilities import Util
+from rest.service import list_entities, read_entity_data, write_entity_data, get_entity_path, get_image_file_dir, get_data_dir
 from kvm.image.kvm_image import KvmImage
 
 image_bp = Blueprint("image", __name__)
@@ -46,6 +48,31 @@ def list_images():
     })
 
 
+def _get_qcow2_info(file_path: str, base_dir: str) -> dict:
+    """Query qcow2 image info. Returns backing-file related fields, or empty dict on failure.
+
+    base_dir: directory used to convert absolute backing path to relative.
+    """
+    try:
+        result = Util.run_command(f"qemu-img info --output=json {file_path}")
+        info = json.loads(result.stdout)
+        virtual_bytes = info.get("virtual-size", 0)
+        backing_path = info.get("full-backing-filename")
+        # Convert to relative path if possible.
+        if backing_path:
+            try:
+                backing_path = os.path.relpath(backing_path, base_dir)
+            except ValueError:
+                pass  # Keep absolute if on different drives.
+        return {
+            "sizeInGB": (virtual_bytes + 1024**3 - 1) // 1024**3,
+            "baseImagePath": backing_path,
+            "baseImageFormat": info.get("backing-filename-format"),
+        }
+    except (SystemError, json.JSONDecodeError, KeyError):
+        return {}
+
+
 def _ensure_json_body():
     """Validate Content-Type and parse JSON body. Returns (data, error_response)."""
     if not request.is_json:
@@ -62,21 +89,21 @@ def _ensure_json_body():
     return data, None, None
 
 
-def _create_image(entity_name: str, data: dict):
-    """Core image creation logic. entity_name comes from URL path."""
+def _create_image(id: str, data: dict):
+    """Core image creation logic. id comes from URL path."""
     logger = _get_logger()
 
     # If imagePath is not specified, auto-generate from imageFileDir.
     if "imagePath" not in data:
         image_format = data.get("imageFormat", "qcow2")
         ext = ".img" if image_format == "img" else ".qcow2"
-        data["imagePath"] = os.path.join(get_image_file_dir(current_app), f"{entity_name}{ext}")
+        data["imagePath"] = os.path.join(get_image_file_dir(current_app), f"{id}{ext}")
 
-    image_path = get_entity_path(current_app, "image", entity_name)
-    already_exists = read_entity_data(current_app, "image", entity_name) is not None
+    image_path = get_entity_path(current_app, "image", id)
+    already_exists = read_entity_data(current_app, "image", id) is not None
 
-    write_entity_data(current_app, "image", entity_name, data)
-    logger.info(f"Create image [{entity_name}] from [{image_path}]")
+    write_entity_data(current_app, "image", id, data)
+    logger.info(f"Create image [{id}] from [{image_path}]")
 
     image = KvmImage(image_path, logger)
     image.Create()
@@ -84,7 +111,7 @@ def _create_image(entity_name: str, data: dict):
     status_code = 200 if already_exists else 201
     return jsonify({
         "success": True,
-        "data": {"name": entity_name, "imagePath": image.ImagePath()}
+        "data": {"name": id, "imagePath": image.ImagePath()}
     }), status_code
 
 
@@ -103,12 +130,12 @@ def create_image_with_name(name: str):
     if data is None:
         return err, code
 
-    # Do NOT accept entityName in body when name is in URL.
-    if "entityName" in data:
+    # Do NOT accept id in body when name is in URL.
+    if "id" in data:
         return jsonify({
             "success": False,
             "error": {"code": "VALIDATION_ERROR",
-                       "message": "'entityName' must come from URL path, not request body"}
+                       "message": "'id' must come from URL path, not request body"}
         }), 400
 
     return _create_image(name, data)
@@ -121,14 +148,14 @@ def create_image():
     if data is None:
         return err, code
 
-    entity_name = data.pop("entityName", None)
-    if entity_name is None:
+    id = data.pop("id", None)
+    if id is None:
         return jsonify({
             "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "Missing 'entityName' field in request body"}
+            "error": {"code": "VALIDATION_ERROR", "message": "Missing 'id' field in request body"}
         }), 400
 
-    return _create_image(entity_name, data)
+    return _create_image(id, data)
 
 
 @image_bp.route("/<name>", methods=["GET"])
@@ -143,7 +170,7 @@ def get_image(name: str):
     # Check JSON definition first.
     data = read_entity_data(current_app, "image", base_name)
     if data is not None:
-        data["entityName"] = base_name
+        data["id"] = base_name
         data["managed"] = True
         return jsonify({"success": True, "data": data})
 
@@ -155,17 +182,20 @@ def get_image(name: str):
             if ext in (".qcow2", ".img", ".raw") and base == base_name:
                 file_path = os.path.join(image_dir, f)
                 size = os.path.getsize(file_path)
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "entityName": base_name,
-                        "name": base_name,
-                        "managed": False,
-                        "file": f,
-                        "path": file_path,
-                        "sizeBytes": size
-                    }
-                })
+                result = {
+                    "id": base_name,
+                    "name": base_name,
+                    "managed": False,
+                    "file": f,
+                    "path": file_path,
+                    "sizeBytes": size,
+                }
+                # Detect backing file for qcow2 images.
+                if ext == ".qcow2":
+                    qinfo = _get_qcow2_info(file_path, get_data_dir(current_app, "image"))
+                    if qinfo is not None:
+                        result.update(qinfo)
+                return jsonify({"success": True, "data": result})
 
     return jsonify({
         "success": False,

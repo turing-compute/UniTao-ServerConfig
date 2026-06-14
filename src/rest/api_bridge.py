@@ -38,18 +38,18 @@ def create_bridge():
             "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
         }), 400
 
-    entity_name = data.pop("entityName", None)
-    if entity_name is None:
+    id = data.pop("id", None)
+    if id is None:
         return jsonify({
             "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "Missing 'entityName' field in request body"}
+            "error": {"code": "VALIDATION_ERROR", "message": "Missing 'id' field in request body"}
         }), 400
 
-    bridge_path = get_entity_path(current_app, "bridge", entity_name)
-    already_exists = read_entity_data(current_app, "bridge", entity_name) is not None
+    bridge_path = get_entity_path(current_app, "bridge", id)
+    already_exists = read_entity_data(current_app, "bridge", id) is not None
 
-    write_entity_data(current_app, "bridge", entity_name, data)
-    logger.info(f"Create bridge [{entity_name}] from [{bridge_path}]")
+    write_entity_data(current_app, "bridge", id, data)
+    logger.info(f"Create bridge [{id}] from [{bridge_path}]")
 
     bridge = NetBridge(logger, bridge_path)
     bridge.Process()
@@ -57,7 +57,7 @@ def create_bridge():
     status_code = 200 if already_exists else 201
     return jsonify({
         "success": True,
-        "data": {"name": entity_name}
+        "data": {"name": id}
     }), status_code
 
 
@@ -69,7 +69,7 @@ def get_bridge(name: str):
             "success": False,
             "error": {"code": "NOT_FOUND", "message": f"Bridge '{name}' not found"}
         }), 404
-    data["entityName"] = name
+    data["id"] = name
     return jsonify({
         "success": True,
         "data": data
