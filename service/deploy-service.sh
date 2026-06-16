@@ -47,6 +47,10 @@ else
     echo "Config already exists at $CONFIG_FILE"
 fi
 
+# Ensure hostKeyDir matches the key pair generated in step 2.
+sudo sed -i "s|\"hostKeyDir\": \".*\"|\"hostKeyDir\": \"$KEY_DIR\"|" "$CONFIG_FILE"
+echo "Config hostKeyDir set to $KEY_DIR"
+
 # 5. Symlink into systemd.
 echo "Linking into systemd..."
 sudo ln -sf "$DEPLOYED_SERVICE" "$SYSTEMD_TARGET"

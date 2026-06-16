@@ -54,6 +54,7 @@
 | 8 | 2026-06-16 | 步骤 7 | `src/rest/app.py` — 初始化 KeyManager |
 | 9 | 2026-06-16 | 步骤 12 | `service/deploy-service.sh` — 部署时自动生成密钥 |
 | 10 | 2026-06-16 | 步骤 10 | **取消** — 改为每 VM 独立密钥对模型，不再需要 access_control.py |
+| 11 | 2026-06-16 | 步骤 8 | `kvm_vm.py` — 修复验证逻辑和 VmName 取值；`deploy-service.sh` 修复 keyDir 路径 |
 
 ---
 

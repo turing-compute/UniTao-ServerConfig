@@ -14,7 +14,7 @@ from rest.api_bridge import bridge_bp
 from rest.api_utils import utils_bp
 
 # Config keys that are directory paths and should be resolved to absolute paths.
-_DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "bridgeDataDir", "keyDir"]
+_DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "bridgeDataDir", "keyDir", "hostKeyDir"]
 
 
 def load_config(config_path: str = None) -> dict:
@@ -52,15 +52,15 @@ def create_app(config: dict = None) -> Flask:
 
     # Initialize KeyManager; warn but don't block startup if keys are missing.
     logger = logging.getLogger(__name__)
-    key_manager = KeyManager(config["keyDir"])
+    key_manager = KeyManager(config["hostKeyDir"])
     if not key_manager.keys_exist():
         logger.warning("Host key pair not found in %s — "
                        "encrypted VM passwords will not be available. "
                        "Run deploy-service.sh or generate_keys.py to create the key pair.",
-                       config["keyDir"])
+                       config["hostKeyDir"])
     else:
         key_manager.load_keys()
-        logger.info("Host key pair loaded from %s", config["keyDir"])
+        logger.info("Host key pair loaded from %s", config["hostKeyDir"])
 
     app = Flask(__name__)
     app.config["CONFIG"] = config

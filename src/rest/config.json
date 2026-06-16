@@ -7,5 +7,6 @@
     "bridgeDataDir": "/opt/kvm/network",
     "defaultBridge": "br0",
     "defaultRamInGB": 2,
-    "keyDir": "/opt/kvm/keys"
+    "keyDir": "/opt/kvm/keys",
+    "hostKeyDir": "/opt/unitiao/keys"
 }
