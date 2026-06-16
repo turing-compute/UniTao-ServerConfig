@@ -24,6 +24,10 @@ def _get_config() -> dict:
     return current_app.config["CONFIG"]
 
 
+def _get_host_key_dir() -> str:
+    return _get_config().get("hostKeyDir", "/opt/unitiao/keys")
+
+
 def _random_mac() -> str:
     mac = [random.randint(0, 255) for _ in range(5)]
     return "0E:" + ":".join(f"{num:02X}" for num in mac)
@@ -271,7 +275,7 @@ def create_vm():
                 f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name}")
 
     # ── Process (creates virsh VM) ──
-    vm = KvmVm(logger, vm_path)
+    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
     vm.Process()
 
     status_code = 200 if already_exists else 201
@@ -326,7 +330,7 @@ def delete_vm(name: str):
     write_entity_data(current_app, "vm", name, data)
 
     vm_path = vm_json_path(current_app, name)
-    vm = KvmVm(logger, vm_path)
+    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
     vm.Process()
 
     vm_root = vm_dir(current_app, name)
@@ -352,7 +356,7 @@ def start_vm(name: str):
     data["vmState"] = KvmVm.Keyword.VmStates.Running
     write_entity_data(current_app, "vm", name, data)
 
-    vm = KvmVm(logger, vm_json_path(current_app, name))
+    vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
     vm.Process()
 
     return jsonify({
@@ -374,7 +378,7 @@ def stop_vm(name: str):
     data["vmState"] = KvmVm.Keyword.VmStates.Stopped
     write_entity_data(current_app, "vm", name, data)
 
-    vm = KvmVm(logger, vm_json_path(current_app, name))
+    vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
     vm.Process()
 
     return jsonify({
@@ -430,7 +434,7 @@ def patch_vm():
     vm_data["vmState"] = vm_state
     write_entity_data(current_app, "vm", vm_id, vm_data)
 
-    vm = KvmVm(logger, vm_json_path(current_app, vm_id))
+    vm = KvmVm(logger, vm_json_path(current_app, vm_id), key_dir=_get_host_key_dir())
     vm.Process()
 
     logger.info(f"Patch VM [{vm_id}] vmState → {vm_state}")
