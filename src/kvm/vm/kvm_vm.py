@@ -8,6 +8,7 @@
 #########################################################################################
 
 import argparse
+import json
 import logging
 import os
 
@@ -261,6 +262,15 @@ class KvmVm:
                     ""
                 ])
         Util.write_file(user_data_path, "w", user_data)
+        # Record host key injection status for traceability.
+        data_dir = os.path.join(self.VmData[self.Keyword.VmPath], "data")
+        os.makedirs(data_dir, exist_ok=True)
+        key_pair_file = os.path.join(data_dir, "key-pairs.json")
+        key_pair_data = {
+            "hostKeyInjected": km is not None,
+        }
+        with open(key_pair_file, "w") as f:
+            json.dump(key_pair_data, f, indent=4)
         return user_data_path
 
     def create_ci_meta_data(self):
