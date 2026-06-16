@@ -6,7 +6,7 @@ Usage:
 
 import sys
 
-from src.security.key_manager import KeyManager
+from security.key_manager import KeyManager
 
 
 def main():
