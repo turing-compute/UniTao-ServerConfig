@@ -95,20 +95,25 @@ class KvmVm:
         vm_ram_in_gb = self.VmData.get(self.Keyword.RamInGb, None)
         if vm_ram_in_gb is None or not isinstance(vm_ram_in_gb, int):
             raise ValueError(f"Missing field [{self.Keyword.RamInGb}] or the ram number in GB is not int")
+        vm_state = self.VmData.get(self.Keyword.VmState, None)
+        if vm_state is None:
+            raise ValueError(f"Missing field[{self.Keyword.VmState}] to specify desired state for the VM")
+        if vm_state not in self.Keyword.VmStates.list():
+            raise ValueError(f"Unknown value [{self.Keyword.VmState}]=[{vm_state}], expect value from list [{self.Keyword.VmStates.list()}]")
+        is_delete = vm_state == self.Keyword.VmStates.NotExists
         vm_disks = self.VmData.get(self.Keyword.Disks, None)
         if vm_disks is None or not isinstance(vm_disks, list) or len(vm_disks) == 0:
             raise ValueError(f"Missing field [{self.Keyword.Disks}] or it's value is not a list or the list is empty")
         for disk_path in vm_disks:
             disk_file_path = self.parse_relative_path(disk_path)
-            if not os.path.exists(disk_file_path) or not os.path.isfile(disk_file_path):
+            if not is_delete and (not os.path.exists(disk_file_path) or not os.path.isfile(disk_file_path)):
                 raise ValueError(f"Disk File Path does not exists[{disk_file_path}]")
             kvm_disk = KvmImage(disk_file_path, self.log)
-            #kvm_disk = KvmDisk(disk_file_path, self.log)
             self.Disks.append(kvm_disk)
         use_cloud_init = self.VmData.get(self.Keyword.UseCloudInit, None)
         if use_cloud_init is None:
             raise ValueError(f"Missing field[{self.Keyword.UseCloudInit}] to specify if vm need to use Cloud Init to boot")
-        if use_cloud_init:
+        if use_cloud_init and not is_delete:
             ci_iso_path = self.VmData.get(self.Keyword.CIIsoPath, None)
             if ci_iso_path is None:
                 raise ValueError(f"Missing [{self.Keyword.CIIsoPath}] for CloudInit to work")
@@ -125,8 +130,8 @@ class KvmVm:
             raise ValueError(f"Missing field [{self.Keyword.Networks}] or it's value is not a list or the list is empty")
         for net_def_path in vm_nets:
             net_def_path = self.parse_relative_path(net_def_path)
-            if not os.path.exists(net_def_path) or not os.path.isfile(net_def_path):
-                raise ValueError(f"Disk File Path does not exists[{net_def_path}]")
+            if not is_delete and (not os.path.exists(net_def_path) or not os.path.isfile(net_def_path)):
+                raise ValueError(f"Network File Path does not exists[{net_def_path}]")
             kvm_net = KvmNetwork(net_def_path, use_cloud_init , self.log)
             self.Networks.append(kvm_net)
         os_type = self.VmData.get(self.Keyword.OsType, None)
@@ -137,11 +142,6 @@ class KvmVm:
         os_variant = self.VmData.get(self.Keyword.OsVariant, None)
         if os_variant is None:
             raise ValueError(f"Missing field[{self.Keyword.OsVariant}] in Vm Data")
-        vm_state = self.VmData.get(self.Keyword.VmState, None)
-        if vm_state is None:
-            raise ValueError(f"Missing field[{self.Keyword.VmState}] to specify desired state for the VM")
-        if vm_state not in self.Keyword.VmStates.list():
-            raise ValueError(f"Unknown value [{self.Keyword.VmState}]=[{vm_state}], expect value from list [{self.Keyword.VmStates.list()}]")
 
     def parse_relative_path(self, file_path):
         vm_path = self.VmData[self.Keyword.VmPath]
