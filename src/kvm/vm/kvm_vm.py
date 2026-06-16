@@ -11,6 +11,7 @@ import argparse
 import logging
 import os
 
+from security.key_manager import KeyManager
 from shared.logger import Log
 from shared.utilities import Util
 
@@ -55,7 +56,7 @@ class KvmVm:
         args = parser.parse_args()
         return args
 
-    def __init__(self, logger: logging.Logger, data_path: str = None):
+    def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys"):
         self.log = logger
         if data_path is None:
             args = KvmVm.parse_args()
@@ -67,6 +68,8 @@ class KvmVm:
         self.VmData = Util.read_json_file(self.DataPath)
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
+        self.KeyDir = key_dir
+        self._key_manager = None
         self.Validate()
 
     def Validate(self):
@@ -149,6 +152,17 @@ class KvmVm:
             return Util.abs_path(os.path.dirname(self.DataPath), file_path)
         return file_path
 
+    def _get_key_manager(self):
+        """Lazy-load KeyManager from key_dir. Returns None if keys are not available."""
+        if self._key_manager is None:
+            self._key_manager = KeyManager(self.KeyDir)
+            if self._key_manager.keys_exist():
+                self._key_manager.load_keys()
+            else:
+                self.log.warning("Host key pair not found in %s, SSH public key will not be injected into VM",
+                                self.KeyDir)
+        return self._key_manager if self._key_manager.is_loaded() else None
+
     def Process(self):
         if self.VmData[self.Keyword.VmState] == self.Keyword.VmStates.NotExists:
             self.log.info(f"To remove VM: [{self.VmName}]")
@@ -219,16 +233,31 @@ class KvmVm:
                f"hostname: {host_name}",
                ""
             ])
-        default_pwd = self.VmData.get(self.Keyword.DefaultPWD, None)
-        if default_pwd is not None: 
+        # Inject Host SSH public key for key-based access.
+        # Fall back to password only when keys are not available.
+        km = self._get_key_manager()
+        if km is not None:
+            host_pubkey = km.get_public_key_openssh()
             user_data.extend([
-                "# Modify default user password and set the password to be expired after first login",
-               f"password: {self.VmData[self.Keyword.DefaultPWD]}",
-                "chpasswd: {expire: False}",
-                "# Allow SSH login for the system",
-                "ssh_pwauth: true",
+                "# Inject Host public key for key-based SSH access",
+                "ssh_authorized_keys:",
+                f"  - {host_pubkey}",
+                "# Disable password authentication",
+                "ssh_pwauth: false",
                 ""
             ])
+            self.log.info("Host SSH public key injected into cloud-init user-data")
+        else:
+            default_pwd = self.VmData.get(self.Keyword.DefaultPWD, None)
+            if default_pwd is not None:
+                user_data.extend([
+                    "# Modify default user password and set the password to be expired after first login",
+                   f"password: {self.VmData[self.Keyword.DefaultPWD]}",
+                    "chpasswd: {expire: False}",
+                    "# Allow SSH login for the system",
+                    "ssh_pwauth: true",
+                    ""
+                ])
         Util.write_file(user_data_path, "w", user_data)
         return user_data_path
 

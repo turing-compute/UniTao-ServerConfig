@@ -26,19 +26,37 @@
 | 5 | `[x]` | `src/security/generate_keys.py` — 部署用密钥生成脚本 |
 | 6 | `[x]` | `src/rest/config.json` — 添加 keyDir 配置项 |
 | 7 | `[x]` | `src/rest/app.py` — 初始化 KeyManager |
-| 8 | `[ ]` | `src/kvm/vm/kvm_vm.py` — 密码解密 + SSH Key 注入 cloud-init |
+| 8 | `[x]` | `src/kvm/vm/kvm_vm.py` — Host 公钥注入 cloud-init ssh_authorized_keys |
 | 9 | `[ ]` | `src/rest/api_vm.py` — 随机密码 + 加密存储 + Access Key 验证 |
-| 10 | `[ ]` | `src/security/access_control.py` — API 访问控制 |
+| 10 | `[-]` | `src/security/access_control.py` — API 访问控制（取消：改为每 VM 独立密钥对模型） |
 | 11 | `[ ]` | `src/security/decrypt_tool.py` — CLI 解密工具 |
 | 12 | `[x]` | `service/deploy-service.sh` — 部署时自动生成密钥 |
 
-> **图例**: `[ ]` 待开始 `[~]` 进行中 `[x]` 已完成
+> **图例**: `[ ]` 待开始 `[~]` 进行中 `[x]` 已完成 `[-]` 已取消
 
 ## 下一步
 
-**→ 步骤 8**: `src/kvm/vm/kvm_vm.py` — 密码解密 + SSH Key 注入 cloud-init
+**→ 步骤 9**: `src/rest/api_vm.py` — 随机密码 + 加密存储 + Access Key 验证
+
+## 执行日志
+
+按实际完成顺序记录。
+
+| # | 日期 | 步骤 | 内容 |
+|---|------|------|------|
+| 1 | 2026-06-16 | 步骤 1 | `src/requirements.txt` — 添加 cryptography>=41.0.0，移除无用的 wget |
+| 2 | 2026-06-16 | 步骤 2 | `src/security/__init__.py` — 创建 security 包 |
+| 3 | 2026-06-16 | 步骤 3 | `src/security/key_manager.py` — KeyManager 完整实现 |
+| 4 | 2026-06-16 | 步骤 4 | `src/security/password_gen.py` — 随机密码生成 |
+| 5 | 2026-06-16 | 步骤 5 | `src/security/generate_keys.py` — CLI 密钥生成脚本 |
+| 6 | 2026-06-16 | — | `req_install.sh` 安装依赖到 extlib/，key_manager.py import 改为 extlib 前缀 |
+| 7 | 2026-06-16 | 步骤 6 | `src/rest/config.json` — 添加 keyDir 配置项 |
+| 8 | 2026-06-16 | 步骤 7 | `src/rest/app.py` — 初始化 KeyManager |
+| 9 | 2026-06-16 | 步骤 12 | `service/deploy-service.sh` — 部署时自动生成密钥 |
+| 10 | 2026-06-16 | 步骤 10 | **取消** — 改为每 VM 独立密钥对模型，不再需要 access_control.py |
 
 ---
+
 
 ## 技术选型
 
@@ -102,11 +120,9 @@ CLI 脚本，供 `deploy-service.sh` 调用:
 ### 步骤 8: `src/kvm/vm/kvm_vm.py`
 
 - `__init__` 增加 `key_dir` 参数，默认 `/opt/unitiao/keys`
-- 新增 `_get_key_manager()` — 懒加载 KeyManager
-- 新增 `_resolve_password(value)` — `ENC:` 前缀解密，否则原样返回 + warn 明文存储
+- 新增 `_get_key_manager()` — 懒加载 KeyManager，从 Host 密钥目录读取公钥
 - **`create_ci_user_data()` 变更**:
-  - 密码部分：调用 `_resolve_password()` 获取明文写入 cloud-init
-  - 新增：`ssh_authorized_keys` 注入 Host 公钥
+  - 新增 `ssh_authorized_keys` 注入 Host 公钥
   ```
   ssh_authorized_keys:
     - ssh-rsa AAAA... host@unitiao
@@ -212,8 +228,7 @@ GET /api/v1/vms/mail01 + X-VM-Access-Key: ENC:QmFz...
 
 ## 验证方式
 
-1. **加解密验证**: `generate_password()` → `encrypt()` → `decrypt()` 一致
-2. **Cloud-init 验证**: `user-data.yaml` 包含 `password:` 和 `ssh_authorized_keys:`
-3. **API 验证**: 无 Key POST 报错 / 有 Key 返回 accessKey / 错误 key → 403
-4. **解密工具**: `decrypt_tool.py --file vm-xxx.json` 输出明文密码
-5. **部署验证**: `deploy-service.sh` 生成 `host_private_key.pem`(600) + `host_public_key.pem`
+1. **Cloud-init 验证**: `user-data.yaml` 包含 `ssh_authorized_keys:` 含 Host 公钥
+2. **API 验证**: 无 Key POST 报错 / 有 Key 返回 accessKey / 错误 key → 403
+3. **解密工具**: `decrypt_tool.py --file vm-xxx.json` 输出明文密码
+4. **部署验证**: `deploy-service.sh` 生成 `host_private_key.pem`(600) + `host_public_key.pem`
