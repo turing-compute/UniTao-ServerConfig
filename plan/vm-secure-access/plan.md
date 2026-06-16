@@ -19,24 +19,24 @@
 
 | 步骤 | 状态 | 内容 |
 |------|------|------|
-| 1 | `[ ]` | `src/requirements.txt` — 添加 cryptography 依赖 |
-| 2 | `[ ]` | `src/security/__init__.py` — 创建 security 包 |
-| 3 | `[ ]` | `src/security/key_manager.py` — RSA 密钥管理、加解密 |
-| 4 | `[ ]` | `src/security/password_gen.py` — 随机密码生成 |
-| 5 | `[ ]` | `src/security/generate_keys.py` — 部署用密钥生成脚本 |
-| 6 | `[ ]` | `src/rest/config.json` — 添加 keyDir 配置项 |
-| 7 | `[ ]` | `src/rest/app.py` — 初始化 KeyManager |
+| 1 | `[x]` | `src/requirements.txt` — 添加 cryptography 依赖 |
+| 2 | `[x]` | `src/security/__init__.py` — 创建 security 包 |
+| 3 | `[x]` | `src/security/key_manager.py` — RSA 密钥管理、加解密 |
+| 4 | `[x]` | `src/security/password_gen.py` — 随机密码生成 |
+| 5 | `[x]` | `src/security/generate_keys.py` — 部署用密钥生成脚本 |
+| 6 | `[x]` | `src/rest/config.json` — 添加 keyDir 配置项 |
+| 7 | `[x]` | `src/rest/app.py` — 初始化 KeyManager |
 | 8 | `[ ]` | `src/kvm/vm/kvm_vm.py` — 密码解密 + SSH Key 注入 cloud-init |
 | 9 | `[ ]` | `src/rest/api_vm.py` — 随机密码 + 加密存储 + Access Key 验证 |
 | 10 | `[ ]` | `src/security/access_control.py` — API 访问控制 |
 | 11 | `[ ]` | `src/security/decrypt_tool.py` — CLI 解密工具 |
-| 12 | `[ ]` | `service/deploy-service.sh` — 部署时自动生成密钥 |
+| 12 | `[x]` | `service/deploy-service.sh` — 部署时自动生成密钥 |
 
 > **图例**: `[ ]` 待开始 `[~]` 进行中 `[x]` 已完成
 
 ## 下一步
 
-**→ 步骤 1**: `src/requirements.txt` — 添加 `cryptography>=41.0.0`
+**→ 步骤 8**: `src/kvm/vm/kvm_vm.py` — 密码解密 + SSH Key 注入 cloud-init
 
 ---
 
