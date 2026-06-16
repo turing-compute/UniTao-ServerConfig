@@ -108,8 +108,9 @@ class KvmVm:
             disk_file_path = self.parse_relative_path(disk_path)
             if not is_delete and (not os.path.exists(disk_file_path) or not os.path.isfile(disk_file_path)):
                 raise ValueError(f"Disk File Path does not exists[{disk_file_path}]")
-            kvm_disk = KvmImage(disk_file_path, self.log)
-            self.Disks.append(kvm_disk)
+            if not is_delete:
+                kvm_disk = KvmImage(disk_file_path, self.log)
+                self.Disks.append(kvm_disk)
         use_cloud_init = self.VmData.get(self.Keyword.UseCloudInit, None)
         if use_cloud_init is None:
             raise ValueError(f"Missing field[{self.Keyword.UseCloudInit}] to specify if vm need to use Cloud Init to boot")
@@ -132,8 +133,9 @@ class KvmVm:
             net_def_path = self.parse_relative_path(net_def_path)
             if not is_delete and (not os.path.exists(net_def_path) or not os.path.isfile(net_def_path)):
                 raise ValueError(f"Network File Path does not exists[{net_def_path}]")
-            kvm_net = KvmNetwork(net_def_path, use_cloud_init , self.log)
-            self.Networks.append(kvm_net)
+            if not is_delete:
+                kvm_net = KvmNetwork(net_def_path, use_cloud_init , self.log)
+                self.Networks.append(kvm_net)
         os_type = self.VmData.get(self.Keyword.OsType, None)
         if os_type is None:
             raise ValueError(f"Missing field[{self.Keyword.OsType}] in Vm Data")
