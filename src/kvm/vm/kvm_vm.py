@@ -64,8 +64,8 @@ class KvmVm:
         self.DataPath = data_path
         if not os.path.exists(self.DataPath):
             raise ValueError(f"Invalid path does not exists.[{self.DataPath}]")
-        self.VmName = Util.file_data_name(self.DataPath)
         self.VmData = Util.read_json_file(self.DataPath)
+        self.VmName = self.VmData.get("id", Util.file_data_name(self.DataPath))
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
         self.KeyDir = key_dir
