@@ -34,7 +34,6 @@ class KvmVm:
         VmPath = "vmPath"
         UseCloudInit = "useCloudInit"
         CIIsoPath = "ciIsoPath"
-        DefaultPWD = "defaultPWD"
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
         Login = "login"
@@ -239,7 +238,7 @@ class KvmVm:
                ""
             ])
         # Inject Host SSH public key for key-based access.
-        # Fall back to password only when keys are not available.
+        # Fall back to random password when keys are not available.
         km = self._get_key_manager()
         if km is not None:
             host_pubkey = km.get_public_key_openssh()
@@ -251,6 +250,7 @@ class KvmVm:
                 "ssh_pwauth: false",
                 ""
             ])
+            self.VmData[self.Keyword.Login] = "host_key"
             self.log.info("Host SSH public key injected into cloud-init user-data")
         else:
             random_pwd = generate_password()
@@ -262,14 +262,10 @@ class KvmVm:
                 "ssh_pwauth: true",
                 ""
             ])
-            self.VmData[self.Keyword.DefaultPWD] = random_pwd
+            self.VmData[self.Keyword.Login] = random_pwd
             self.log.info("Random password generated and injected into cloud-init user-data")
         Util.write_file(user_data_path, "w", user_data)
-        # Update VM data JSON with login attribute for traceability.
-        if km is not None:
-            self.VmData[self.Keyword.Login] = "host_key"
-        else:
-            self.VmData[self.Keyword.Login] = self.VmData.get(self.Keyword.DefaultPWD, "")
+        # Write VM data JSON back with login attribute.
         with open(self.DataPath, "w") as f:
             json.dump(self.VmData, f, indent=4)
         return user_data_path

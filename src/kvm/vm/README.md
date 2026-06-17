@@ -16,7 +16,7 @@ This utilities will use all the resource and attribute given by json file and cr
     "vmState": "running",           // desired vm state. running, stopped, notExists
     "useCloudInit": true,           // define how the VM will prepare itself
     "ciIsoPath": "{path}",          // path to Cloud Init ISO image file
-    "defaultPWD": "{pwd}",          // setup default password for default user and expire after first login   
+    "login": "host_key|{pwd}",      // auto-generated: "host_key" when Host key injected, or random password
     "vmHostName": "{hostname}",     // setup vm hostname when create
     "hostCPU": true                 // optional, define if the VM will use --cpu host to set VM use CPU-Pass-Through Mode
 }

@@ -120,7 +120,6 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "vmHostName": vm_host_name,
         "osType": "linux",
         "osVariant": os_variant,
-        "defaultPWD": "ubuntu",
     }
 
 
