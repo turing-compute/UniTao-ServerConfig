@@ -24,6 +24,10 @@ def _get_config() -> dict:
     return current_app.config["CONFIG"]
 
 
+def _get_host_key_dir() -> str:
+    return _get_config().get("hostKeyDir", "/opt/unitiao/keys")
+
+
 def _random_mac() -> str:
     mac = [random.randint(0, 255) for _ in range(5)]
     return "0E:" + ":".join(f"{num:02X}" for num in mac)
@@ -100,9 +104,11 @@ def _gen_net_json(bridge_name: str, bridge_data: dict, static_ip4: str = None, g
 
 def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
                  vm_host_name: str, vm_root: str,
-                 disk_file_name: str, net_file_name: str) -> dict:
+                 disk_file_name: str, net_file_name: str,
+                 auth_type: str = None, customer_pwd: str = None,
+                 customer_keys: list = None) -> dict:
     """Generate the main VM definition JSON per vm_data_sample.json."""
-    return {
+    vm_json = {
         "id": vm_name,
         "description": [],
         "vmPath": vm_root,
@@ -116,8 +122,8 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "vmHostName": vm_host_name,
         "osType": "linux",
         "osVariant": os_variant,
-        "defaultPWD": "ubuntu",
     }
+    return vm_json
 
 
 def _query_virtual_size_gb(image_path: str, logger: logging.Logger) -> int:
@@ -199,6 +205,43 @@ def create_vm():
     # ── Optional fields ──
     ipv4 = data.get("ipv4", None)          # static IP in CIDR notation
     gateway4 = data.get("gateway4", None)  # gateway for static IP
+    auth_type = data.get("authType", None)
+    customer_pwd = data.get("customerPWD", None)
+    customer_keys = data.get("customerKeys", None)
+    share_inv = data.get("shareInventoryData", False)
+
+    # ── Validate authType ──
+    if auth_type is not None:
+        if auth_type not in KvmVm.Keyword.AuthTypes.list():
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"Invalid authType '{auth_type}', expected one of {KvmVm.Keyword.AuthTypes.list()}"}
+            }), 400
+        if auth_type == KvmVm.Keyword.AuthTypes.CustomerPWD:
+            if not customer_pwd or not isinstance(customer_pwd, str):
+                return jsonify({
+                    "success": False,
+                    "error": {"code": "VALIDATION_ERROR",
+                              "message": "authType=CustomerPWD requires 'customerPWD' to be a non-empty string"}
+                }), 400
+        if auth_type == KvmVm.Keyword.AuthTypes.CustomerKey:
+            if not customer_keys or not isinstance(customer_keys, list) or \
+               not all(isinstance(k, str) and k for k in customer_keys):
+                return jsonify({
+                    "success": False,
+                    "error": {"code": "VALIDATION_ERROR",
+                              "message": "authType=CustomerKey requires 'customerKeys' to be a non-empty array of strings"}
+                }), 400
+
+    # ── Validate shareInventoryData ──
+    if not isinstance(share_inv, bool):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "'shareInventoryData' must be a boolean"}
+        }), 400
+    host_api_url = _get_config().get("hostApiUrl", None)
 
     # ── Validate types ──
     for field_name, field_val in [("cpu", cpu), ("ramInGB", ram_gb)]:
@@ -257,7 +300,9 @@ def create_vm():
 
     # Main VM JSON.
     vm_json = _gen_vm_json(vm_id, cpu, ram_gb, os_variant, vm_host_name,
-                           vm_root, disk_file_name, net_file_name)
+                           vm_root, disk_file_name, net_file_name,
+                           auth_type=auth_type, customer_pwd=customer_pwd,
+                           customer_keys=customer_keys)
     vm_path = vm_json_path(current_app, vm_id)
     with open(vm_path, "w") as f:
         json.dump(vm_json, f, indent=4)
@@ -271,7 +316,10 @@ def create_vm():
                 f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name}")
 
     # ── Process (creates virsh VM) ──
-    vm = KvmVm(logger, vm_path)
+    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir(),
+               auth_type=auth_type, customer_pwd=customer_pwd,
+               customer_keys=customer_keys,
+               share_inventory_data=share_inv, host_api_url=host_api_url)
     vm.Process()
 
     status_code = 200 if already_exists else 201
@@ -300,16 +348,69 @@ def get_vm(name: str):
                 with open(file_path, "r") as fh:
                     data_files[f] = json.load(fh)
 
+    # Load inventory data from data/inventory/ subdirectory.
+    inventory = {}
+    inv_dir = os.path.join(data_dir, "inventory")
+    if os.path.isdir(inv_dir):
+        for f in sorted(os.listdir(inv_dir)):
+            if f.endswith(".json"):
+                file_path = os.path.join(inv_dir, f)
+                with open(file_path, "r") as fh:
+                    inventory[f] = json.load(fh)
+
     virsh_state = _get_virsh_state(name)
     result = {
         "name": name,
         "virshState": virsh_state,
     }
     result.update(data_files)
+    if inventory:
+        result["inventory"] = inventory
     return jsonify({
         "success": True,
         "data": result
     })
+
+
+@vm_bp.route("/<name>/inventory", methods=["POST"])
+def post_inventory(name: str):
+    """Accept inventory data from a VM and store it in data/inventory/."""
+    logger = _get_logger()
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+        }), 404
+
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
+        }), 400
+
+    inv_data = request.get_json()
+    if inv_data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
+        }), 400
+
+    data_dir = vm_data_dir(current_app, name)
+    inv_dir = os.path.join(data_dir, "inventory")
+    os.makedirs(inv_dir, exist_ok=True)
+
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    inv_file = os.path.join(inv_dir, f"{timestamp}.json")
+    with open(inv_file, "w") as f:
+        json.dump(inv_data, f, indent=4)
+
+    logger.info(f"Inventory data posted for VM [{name}] → {timestamp}.json")
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "file": f"{timestamp}.json"}
+    }), 201
 
 
 @vm_bp.route("/<name>", methods=["DELETE"])
@@ -326,7 +427,7 @@ def delete_vm(name: str):
     write_entity_data(current_app, "vm", name, data)
 
     vm_path = vm_json_path(current_app, name)
-    vm = KvmVm(logger, vm_path)
+    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
     vm.Process()
 
     vm_root = vm_dir(current_app, name)
@@ -352,7 +453,7 @@ def start_vm(name: str):
     data["vmState"] = KvmVm.Keyword.VmStates.Running
     write_entity_data(current_app, "vm", name, data)
 
-    vm = KvmVm(logger, vm_json_path(current_app, name))
+    vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
     vm.Process()
 
     return jsonify({
@@ -374,7 +475,7 @@ def stop_vm(name: str):
     data["vmState"] = KvmVm.Keyword.VmStates.Stopped
     write_entity_data(current_app, "vm", name, data)
 
-    vm = KvmVm(logger, vm_json_path(current_app, name))
+    vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
     vm.Process()
 
     return jsonify({
@@ -430,7 +531,7 @@ def patch_vm():
     vm_data["vmState"] = vm_state
     write_entity_data(current_app, "vm", vm_id, vm_data)
 
-    vm = KvmVm(logger, vm_json_path(current_app, vm_id))
+    vm = KvmVm(logger, vm_json_path(current_app, vm_id), key_dir=_get_host_key_dir())
     vm.Process()
 
     logger.info(f"Patch VM [{vm_id}] vmState → {vm_state}")

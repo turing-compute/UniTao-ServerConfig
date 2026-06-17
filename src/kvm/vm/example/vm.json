@@ -15,6 +15,5 @@
     "vmHostName": "docker-proxy",
     "osType": "linux",
     "osVariant": "ubuntu26.04",
-    "defaultPWD": "helloworld",
     "hostCPU": true
 }

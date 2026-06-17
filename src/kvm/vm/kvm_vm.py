@@ -8,9 +8,12 @@
 #########################################################################################
 
 import argparse
+import json
 import logging
 import os
 
+from security.key_manager import KeyManager
+from security.password_gen import generate_password
 from shared.logger import Log
 from shared.utilities import Util
 
@@ -31,9 +34,26 @@ class KvmVm:
         VmPath = "vmPath"
         UseCloudInit = "useCloudInit"
         CIIsoPath = "ciIsoPath"
-        DefaultPWD = "defaultPWD"
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
+        Login = "login"
+
+        class AuthTypes:
+            CustomerPWD = "CustomerPWD"
+            RandomPWD = "RandomPWD"
+            HostKey = "HostKey"
+            CustomerKey = "CustomerKey"
+            NoAuth = "NoAuth"
+
+            @staticmethod
+            def list():
+                return [
+                    KvmVm.Keyword.AuthTypes.CustomerPWD,
+                    KvmVm.Keyword.AuthTypes.RandomPWD,
+                    KvmVm.Keyword.AuthTypes.HostKey,
+                    KvmVm.Keyword.AuthTypes.CustomerKey,
+                    KvmVm.Keyword.AuthTypes.NoAuth,
+                ]
 
         class VmStates:
             Running = "running"
@@ -55,7 +75,9 @@ class KvmVm:
         args = parser.parse_args()
         return args
 
-    def __init__(self, logger: logging.Logger, data_path: str = None):
+    def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys",
+                 auth_type: str = None, customer_pwd: str = None, customer_keys: list = None,
+                 share_inventory_data: bool = False, host_api_url: str = None):
         self.log = logger
         if data_path is None:
             args = KvmVm.parse_args()
@@ -63,10 +85,17 @@ class KvmVm:
         self.DataPath = data_path
         if not os.path.exists(self.DataPath):
             raise ValueError(f"Invalid path does not exists.[{self.DataPath}]")
-        self.VmName = Util.file_data_name(self.DataPath)
         self.VmData = Util.read_json_file(self.DataPath)
+        self.VmName = self.VmData.get("id", Util.file_data_name(self.DataPath))
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
+        self.KeyDir = key_dir
+        self._auth_type = auth_type
+        self._customer_pwd = customer_pwd
+        self._customer_keys = customer_keys
+        self._share_inventory_data = share_inventory_data
+        self._host_api_url = host_api_url
+        self._key_manager = None
         self.Validate()
 
     def Validate(self):
@@ -92,20 +121,26 @@ class KvmVm:
         vm_ram_in_gb = self.VmData.get(self.Keyword.RamInGb, None)
         if vm_ram_in_gb is None or not isinstance(vm_ram_in_gb, int):
             raise ValueError(f"Missing field [{self.Keyword.RamInGb}] or the ram number in GB is not int")
+        vm_state = self.VmData.get(self.Keyword.VmState, None)
+        if vm_state is None:
+            raise ValueError(f"Missing field[{self.Keyword.VmState}] to specify desired state for the VM")
+        if vm_state not in self.Keyword.VmStates.list():
+            raise ValueError(f"Unknown value [{self.Keyword.VmState}]=[{vm_state}], expect value from list [{self.Keyword.VmStates.list()}]")
+        is_delete = vm_state == self.Keyword.VmStates.NotExists
         vm_disks = self.VmData.get(self.Keyword.Disks, None)
         if vm_disks is None or not isinstance(vm_disks, list) or len(vm_disks) == 0:
             raise ValueError(f"Missing field [{self.Keyword.Disks}] or it's value is not a list or the list is empty")
         for disk_path in vm_disks:
             disk_file_path = self.parse_relative_path(disk_path)
-            if not os.path.exists(disk_file_path) or not os.path.isfile(disk_file_path):
+            if not is_delete and (not os.path.exists(disk_file_path) or not os.path.isfile(disk_file_path)):
                 raise ValueError(f"Disk File Path does not exists[{disk_file_path}]")
-            kvm_disk = KvmImage(disk_file_path, self.log)
-            #kvm_disk = KvmDisk(disk_file_path, self.log)
-            self.Disks.append(kvm_disk)
+            if not is_delete:
+                kvm_disk = KvmImage(disk_file_path, self.log)
+                self.Disks.append(kvm_disk)
         use_cloud_init = self.VmData.get(self.Keyword.UseCloudInit, None)
         if use_cloud_init is None:
             raise ValueError(f"Missing field[{self.Keyword.UseCloudInit}] to specify if vm need to use Cloud Init to boot")
-        if use_cloud_init:
+        if use_cloud_init and not is_delete:
             ci_iso_path = self.VmData.get(self.Keyword.CIIsoPath, None)
             if ci_iso_path is None:
                 raise ValueError(f"Missing [{self.Keyword.CIIsoPath}] for CloudInit to work")
@@ -122,10 +157,11 @@ class KvmVm:
             raise ValueError(f"Missing field [{self.Keyword.Networks}] or it's value is not a list or the list is empty")
         for net_def_path in vm_nets:
             net_def_path = self.parse_relative_path(net_def_path)
-            if not os.path.exists(net_def_path) or not os.path.isfile(net_def_path):
-                raise ValueError(f"Disk File Path does not exists[{net_def_path}]")
-            kvm_net = KvmNetwork(net_def_path, use_cloud_init , self.log)
-            self.Networks.append(kvm_net)
+            if not is_delete and (not os.path.exists(net_def_path) or not os.path.isfile(net_def_path)):
+                raise ValueError(f"Network File Path does not exists[{net_def_path}]")
+            if not is_delete:
+                kvm_net = KvmNetwork(net_def_path, use_cloud_init , self.log)
+                self.Networks.append(kvm_net)
         os_type = self.VmData.get(self.Keyword.OsType, None)
         if os_type is None:
             raise ValueError(f"Missing field[{self.Keyword.OsType}] in Vm Data")
@@ -134,11 +170,6 @@ class KvmVm:
         os_variant = self.VmData.get(self.Keyword.OsVariant, None)
         if os_variant is None:
             raise ValueError(f"Missing field[{self.Keyword.OsVariant}] in Vm Data")
-        vm_state = self.VmData.get(self.Keyword.VmState, None)
-        if vm_state is None:
-            raise ValueError(f"Missing field[{self.Keyword.VmState}] to specify desired state for the VM")
-        if vm_state not in self.Keyword.VmStates.list():
-            raise ValueError(f"Unknown value [{self.Keyword.VmState}]=[{vm_state}], expect value from list [{self.Keyword.VmStates.list()}]")
 
     def parse_relative_path(self, file_path):
         vm_path = self.VmData[self.Keyword.VmPath]
@@ -148,6 +179,17 @@ class KvmVm:
         if not os.path.isabs(file_path):
             return Util.abs_path(os.path.dirname(self.DataPath), file_path)
         return file_path
+
+    def _get_key_manager(self):
+        """Lazy-load KeyManager from key_dir. Returns None if keys are not available."""
+        if self._key_manager is None:
+            self._key_manager = KeyManager(self.KeyDir)
+            if self._key_manager.keys_exist():
+                self._key_manager.load_keys()
+            else:
+                self.log.warning("Host key pair not found in %s, SSH public key will not be injected into VM",
+                                self.KeyDir)
+        return self._key_manager if self._key_manager.is_loaded() else None
 
     def Process(self):
         if self.VmData[self.Keyword.VmState] == self.Keyword.VmStates.NotExists:
@@ -219,18 +261,125 @@ class KvmVm:
                f"hostname: {host_name}",
                ""
             ])
-        default_pwd = self.VmData.get(self.Keyword.DefaultPWD, None)
-        if default_pwd is not None: 
+        # Determine authentication type.
+        # Default (no authType): host key if available, else random password.
+        auth_type = self._auth_type
+        km = self._get_key_manager()
+
+        if auth_type == self.Keyword.AuthTypes.CustomerPWD:
+            self._apply_customer_pwd(user_data)
+        elif auth_type == self.Keyword.AuthTypes.RandomPWD:
+            self._apply_random_pwd(user_data)
+        elif auth_type == self.Keyword.AuthTypes.HostKey:
+            self._apply_host_key(user_data, km)
+        elif auth_type == self.Keyword.AuthTypes.CustomerKey:
+            self._apply_customer_keys(user_data)
+        elif auth_type == self.Keyword.AuthTypes.NoAuth:
+            self._apply_no_auth(user_data)
+        else:
+            # Default: host key if available, else random password.
+            if km is not None:
+                self._apply_host_key(user_data, km)
+            else:
+                self._apply_random_pwd(user_data)
+
+        # Inject inventory config for VM-to-host data sharing.
+        self._apply_inventory_data(user_data)
+
+        Util.write_file(user_data_path, "w", user_data)
+        # Write VM data JSON back with login attribute.
+        with open(self.DataPath, "w") as f:
+            json.dump(self.VmData, f, indent=4)
+        return user_data_path
+
+    def _apply_customer_pwd(self, user_data: list):
+        pwd = self._customer_pwd or ""
+        user_data.extend([
+            "# Use customer-provided password",
+            f"password: {pwd}",
+            "chpasswd: {expire: False}",
+            "# Allow SSH login for the system",
+            "ssh_pwauth: true",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = pwd
+        self.log.info("Customer password injected into cloud-init user-data")
+
+    def _apply_random_pwd(self, user_data: list):
+        random_pwd = generate_password()
+        user_data.extend([
+            "# Modify default user password and set the password to be expired after first login",
+            f"password: {random_pwd}",
+            "chpasswd: {expire: False}",
+            "# Allow SSH login for the system",
+            "ssh_pwauth: true",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = random_pwd
+        self.log.info("Random password generated and injected into cloud-init user-data")
+
+    def _apply_host_key(self, user_data: list, km):
+        if km is not None:
+            host_pubkey = km.get_public_key_openssh()
             user_data.extend([
-                "# Modify default user password and set the password to be expired after first login",
-               f"password: {self.VmData[self.Keyword.DefaultPWD]}",
-                "chpasswd: {expire: False}",
-                "# Allow SSH login for the system",
-                "ssh_pwauth: true",
+                "# Inject Host public key for key-based SSH access",
+                "ssh_authorized_keys:",
+                f"  - {host_pubkey}",
+                "# Disable password authentication",
+                "ssh_pwauth: false",
                 ""
             ])
-        Util.write_file(user_data_path, "w", user_data)
-        return user_data_path
+            self.VmData[self.Keyword.Login] = "host_key"
+            self.log.info("Host SSH public key injected into cloud-init user-data")
+        else:
+            self.log.warning("HostKey authType requested but host key not available, falling back to random password")
+            self._apply_random_pwd(user_data)
+
+    def _apply_customer_keys(self, user_data: list):
+        keys = self._customer_keys or []
+        if not keys:
+            self.log.warning("CustomerKey authType requested but customerKeys is empty, falling back to random password")
+            self._apply_random_pwd(user_data)
+            return
+        user_data.append("# Inject customer-provided SSH public keys")
+        user_data.append("ssh_authorized_keys:")
+        for key in keys:
+            user_data.append(f"  - {key}")
+        user_data.extend([
+            "# Disable password authentication",
+            "ssh_pwauth: false",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = "customer_key"
+        self.log.info("Customer SSH public keys injected into cloud-init user-data")
+
+    def _apply_no_auth(self, user_data: list):
+        user_data.extend([
+            "# No authentication configured — fully automated VM",
+            "ssh_pwauth: false",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = "none"
+        self.log.info("NoAuth: no password or SSH keys injected into cloud-init user-data")
+
+    def _apply_inventory_data(self, user_data: list):
+        if not self._share_inventory_data:
+            return
+        if not self._host_api_url:
+            self.log.warning("shareInventoryData=true but hostApiUrl not configured, skipping")
+            return
+        inventory_config = json.dumps({
+            "hostApiUrl": self._host_api_url,
+            "vmId": self.VmName,
+        })
+        user_data.extend([
+            "# Inject inventory config for VM-to-host data sharing",
+            "runcmd:",
+            "  - mkdir -p /opt/unitao-server-config",
+            f"  - echo '{inventory_config}' > /opt/unitao-server-config/inventory.json",
+            ""
+        ])
+        self.log.info("Inventory config (runcmd) injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")

@@ -21,13 +21,24 @@ echo "Repo root:   $REPO_ROOT"
 # 1. Create runtime directory.
 sudo mkdir -p "$RUNTIME_DIR"
 
-# 2. Copy service file to runtime dir and fix paths.
+# 2. Generate host key pair for VM secure access.
+KEY_DIR="$RUNTIME_DIR/keys"
+if [ ! -f "$KEY_DIR/host_private_key.pem" ]; then
+    echo "Generating host key pair (RSA 4096)..."
+    sudo "$REPO_ROOT/src/runpy.sh" "$REPO_ROOT/src/security/generate_keys.py" "$KEY_DIR"
+    sudo chmod 600 "$KEY_DIR/host_private_key.pem"
+    echo "Key pair generated in $KEY_DIR"
+else
+    echo "Host key pair already exists in $KEY_DIR"
+fi
+
+# 3. Copy service file to runtime dir and fix paths.
 sudo cp "$TEMPLATE_SERVICE" "$DEPLOYED_SERVICE"
 sudo sed -i "s|{{REPO_ROOT}}|$REPO_ROOT|g" "$DEPLOYED_SERVICE"
 sudo sed -i "s|{{CONFIG_DIR}}|$RUNTIME_DIR|g" "$DEPLOYED_SERVICE"
 echo "Service file installed to $DEPLOYED_SERVICE"
 
-# 3. Copy default config.json if not already present.
+# 4. Copy default config.json if not already present.
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Config not found, copying default..."
     sudo cp "$DEFAULT_CONFIG" "$CONFIG_FILE"
@@ -36,7 +47,11 @@ else
     echo "Config already exists at $CONFIG_FILE"
 fi
 
-# 4. Symlink into systemd.
+# Ensure hostKeyDir matches the key pair generated in step 2.
+sudo sed -i "s|\"hostKeyDir\": \".*\"|\"hostKeyDir\": \"$KEY_DIR\"|" "$CONFIG_FILE"
+echo "Config hostKeyDir set to $KEY_DIR"
+
+# 5. Symlink into systemd.
 echo "Linking into systemd..."
 sudo ln -sf "$DEPLOYED_SERVICE" "$SYSTEMD_TARGET"
 sudo systemctl daemon-reload
