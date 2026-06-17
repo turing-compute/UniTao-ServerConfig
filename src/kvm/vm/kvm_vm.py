@@ -13,6 +13,7 @@ import logging
 import os
 
 from security.key_manager import KeyManager
+from security.password_gen import generate_password
 from shared.logger import Log
 from shared.utilities import Util
 
@@ -36,6 +37,7 @@ class KvmVm:
         DefaultPWD = "defaultPWD"
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
+        Login = "login"
 
         class VmStates:
             Running = "running"
@@ -251,26 +253,25 @@ class KvmVm:
             ])
             self.log.info("Host SSH public key injected into cloud-init user-data")
         else:
-            default_pwd = self.VmData.get(self.Keyword.DefaultPWD, None)
-            if default_pwd is not None:
-                user_data.extend([
-                    "# Modify default user password and set the password to be expired after first login",
-                   f"password: {self.VmData[self.Keyword.DefaultPWD]}",
-                    "chpasswd: {expire: False}",
-                    "# Allow SSH login for the system",
-                    "ssh_pwauth: true",
-                    ""
-                ])
+            random_pwd = generate_password()
+            user_data.extend([
+                "# Modify default user password and set the password to be expired after first login",
+               f"password: {random_pwd}",
+                "chpasswd: {expire: False}",
+                "# Allow SSH login for the system",
+                "ssh_pwauth: true",
+                ""
+            ])
+            self.VmData[self.Keyword.DefaultPWD] = random_pwd
+            self.log.info("Random password generated and injected into cloud-init user-data")
         Util.write_file(user_data_path, "w", user_data)
-        # Record host key injection status for traceability.
-        data_dir = os.path.join(self.VmData[self.Keyword.VmPath], "data")
-        os.makedirs(data_dir, exist_ok=True)
-        key_pair_file = os.path.join(data_dir, "key-pairs.json")
-        key_pair_data = {
-            "hostKeyInjected": km is not None,
-        }
-        with open(key_pair_file, "w") as f:
-            json.dump(key_pair_data, f, indent=4)
+        # Update VM data JSON with login attribute for traceability.
+        if km is not None:
+            self.VmData[self.Keyword.Login] = "host_key"
+        else:
+            self.VmData[self.Keyword.Login] = self.VmData.get(self.Keyword.DefaultPWD, "")
+        with open(self.DataPath, "w") as f:
+            json.dump(self.VmData, f, indent=4)
         return user_data_path
 
     def create_ci_meta_data(self):
