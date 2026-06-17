@@ -366,7 +366,7 @@ class KvmVm:
         if not self._share_inventory_data:
             return
         if not self._host_api_url:
-            self.log.warning("shareInventoryData=true but hostApiUrl not configured, skipping write_files")
+            self.log.warning("shareInventoryData=true but hostApiUrl not configured, skipping")
             return
         inventory_config = json.dumps({
             "hostApiUrl": self._host_api_url,
@@ -374,21 +374,12 @@ class KvmVm:
         })
         user_data.extend([
             "# Inject inventory config for VM-to-host data sharing",
-            "# Ensure parent directory exists before write_files runs",
-            "bootcmd:",
+            "runcmd:",
             "  - mkdir -p /opt/unitao-server-config",
-            "write_files:",
-            "  - path: /opt/unitao-server-config/inventory.json",
-            "    content: |",
-        ])
-        for line in inventory_config.split("\n"):
-            user_data.append(f"      {line}")
-        user_data.extend([
-            "    permissions: '0644'",
-            "    owner: root:root",
+            f"  - echo '{inventory_config}' > /opt/unitao-server-config/inventory.json",
             ""
         ])
-        self.log.info("Inventory config (write_files) injected into cloud-init user-data")
+        self.log.info("Inventory config (runcmd) injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")
