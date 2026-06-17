@@ -123,12 +123,6 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "osType": "linux",
         "osVariant": os_variant,
     }
-    if auth_type is not None:
-        vm_json["authType"] = auth_type
-    if customer_pwd is not None:
-        vm_json["customerPWD"] = customer_pwd
-    if customer_keys is not None:
-        vm_json["customerKeys"] = customer_keys
     return vm_json
 
 
@@ -312,7 +306,9 @@ def create_vm():
                 f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name}")
 
     # ── Process (creates virsh VM) ──
-    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
+    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir(),
+               auth_type=auth_type, customer_pwd=customer_pwd,
+               customer_keys=customer_keys)
     vm.Process()
 
     status_code = 200 if already_exists else 201

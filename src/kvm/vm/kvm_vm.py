@@ -37,9 +37,6 @@ class KvmVm:
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
         Login = "login"
-        AuthType = "authType"
-        CustomerPWD = "customerPWD"
-        CustomerKeys = "customerKeys"
 
         class AuthTypes:
             CustomerPWD = "CustomerPWD"
@@ -78,7 +75,8 @@ class KvmVm:
         args = parser.parse_args()
         return args
 
-    def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys"):
+    def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys",
+                 auth_type: str = None, customer_pwd: str = None, customer_keys: list = None):
         self.log = logger
         if data_path is None:
             args = KvmVm.parse_args()
@@ -91,6 +89,9 @@ class KvmVm:
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
         self.KeyDir = key_dir
+        self._auth_type = auth_type
+        self._customer_pwd = customer_pwd
+        self._customer_keys = customer_keys
         self._key_manager = None
         self.Validate()
 
@@ -259,7 +260,7 @@ class KvmVm:
             ])
         # Determine authentication type.
         # Default (no authType): host key if available, else random password.
-        auth_type = self.VmData.get(self.Keyword.AuthType, None)
+        auth_type = self._auth_type
         km = self._get_key_manager()
 
         if auth_type == self.Keyword.AuthTypes.CustomerPWD:
@@ -286,7 +287,7 @@ class KvmVm:
         return user_data_path
 
     def _apply_customer_pwd(self, user_data: list):
-        pwd = self.VmData.get(self.Keyword.CustomerPWD, "")
+        pwd = self._customer_pwd or ""
         user_data.extend([
             "# Use customer-provided password",
             f"password: {pwd}",
@@ -329,7 +330,7 @@ class KvmVm:
             self._apply_random_pwd(user_data)
 
     def _apply_customer_keys(self, user_data: list):
-        keys = self.VmData.get(self.Keyword.CustomerKeys, [])
+        keys = self._customer_keys or []
         if not keys:
             self.log.warning("CustomerKey authType requested but customerKeys is empty, falling back to random password")
             self._apply_random_pwd(user_data)
