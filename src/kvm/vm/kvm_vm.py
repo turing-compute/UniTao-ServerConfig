@@ -37,6 +37,26 @@ class KvmVm:
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
         Login = "login"
+        AuthType = "authType"
+        CustomerPWD = "customerPWD"
+        CustomerKeys = "customerKeys"
+
+        class AuthTypes:
+            CustomerPWD = "CustomerPWD"
+            RandomPWD = "RandomPWD"
+            HostKey = "HostKey"
+            CustomerKey = "CustomerKey"
+            NoAuth = "NoAuth"
+
+            @staticmethod
+            def list():
+                return [
+                    KvmVm.Keyword.AuthTypes.CustomerPWD,
+                    KvmVm.Keyword.AuthTypes.RandomPWD,
+                    KvmVm.Keyword.AuthTypes.HostKey,
+                    KvmVm.Keyword.AuthTypes.CustomerKey,
+                    KvmVm.Keyword.AuthTypes.NoAuth,
+                ]
 
         class VmStates:
             Running = "running"
@@ -237,9 +257,61 @@ class KvmVm:
                f"hostname: {host_name}",
                ""
             ])
-        # Inject Host SSH public key for key-based access.
-        # Fall back to random password when keys are not available.
+        # Determine authentication type.
+        # Default (no authType): host key if available, else random password.
+        auth_type = self.VmData.get(self.Keyword.AuthType, None)
         km = self._get_key_manager()
+
+        if auth_type == self.Keyword.AuthTypes.CustomerPWD:
+            self._apply_customer_pwd(user_data)
+        elif auth_type == self.Keyword.AuthTypes.RandomPWD:
+            self._apply_random_pwd(user_data)
+        elif auth_type == self.Keyword.AuthTypes.HostKey:
+            self._apply_host_key(user_data, km)
+        elif auth_type == self.Keyword.AuthTypes.CustomerKey:
+            self._apply_customer_keys(user_data)
+        elif auth_type == self.Keyword.AuthTypes.NoAuth:
+            self._apply_no_auth(user_data)
+        else:
+            # Default: host key if available, else random password.
+            if km is not None:
+                self._apply_host_key(user_data, km)
+            else:
+                self._apply_random_pwd(user_data)
+
+        Util.write_file(user_data_path, "w", user_data)
+        # Write VM data JSON back with login attribute.
+        with open(self.DataPath, "w") as f:
+            json.dump(self.VmData, f, indent=4)
+        return user_data_path
+
+    def _apply_customer_pwd(self, user_data: list):
+        pwd = self.VmData.get(self.Keyword.CustomerPWD, "")
+        user_data.extend([
+            "# Use customer-provided password",
+            f"password: {pwd}",
+            "chpasswd: {expire: False}",
+            "# Allow SSH login for the system",
+            "ssh_pwauth: true",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = pwd
+        self.log.info("Customer password injected into cloud-init user-data")
+
+    def _apply_random_pwd(self, user_data: list):
+        random_pwd = generate_password()
+        user_data.extend([
+            "# Modify default user password and set the password to be expired after first login",
+            f"password: {random_pwd}",
+            "chpasswd: {expire: False}",
+            "# Allow SSH login for the system",
+            "ssh_pwauth: true",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = random_pwd
+        self.log.info("Random password generated and injected into cloud-init user-data")
+
+    def _apply_host_key(self, user_data: list, km):
         if km is not None:
             host_pubkey = km.get_public_key_openssh()
             user_data.extend([
@@ -253,22 +325,35 @@ class KvmVm:
             self.VmData[self.Keyword.Login] = "host_key"
             self.log.info("Host SSH public key injected into cloud-init user-data")
         else:
-            random_pwd = generate_password()
-            user_data.extend([
-                "# Modify default user password and set the password to be expired after first login",
-               f"password: {random_pwd}",
-                "chpasswd: {expire: False}",
-                "# Allow SSH login for the system",
-                "ssh_pwauth: true",
-                ""
-            ])
-            self.VmData[self.Keyword.Login] = random_pwd
-            self.log.info("Random password generated and injected into cloud-init user-data")
-        Util.write_file(user_data_path, "w", user_data)
-        # Write VM data JSON back with login attribute.
-        with open(self.DataPath, "w") as f:
-            json.dump(self.VmData, f, indent=4)
-        return user_data_path
+            self.log.warning("HostKey authType requested but host key not available, falling back to random password")
+            self._apply_random_pwd(user_data)
+
+    def _apply_customer_keys(self, user_data: list):
+        keys = self.VmData.get(self.Keyword.CustomerKeys, [])
+        if not keys:
+            self.log.warning("CustomerKey authType requested but customerKeys is empty, falling back to random password")
+            self._apply_random_pwd(user_data)
+            return
+        user_data.append("# Inject customer-provided SSH public keys")
+        user_data.append("ssh_authorized_keys:")
+        for key in keys:
+            user_data.append(f"  - {key}")
+        user_data.extend([
+            "# Disable password authentication",
+            "ssh_pwauth: false",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = "customer_key"
+        self.log.info("Customer SSH public keys injected into cloud-init user-data")
+
+    def _apply_no_auth(self, user_data: list):
+        user_data.extend([
+            "# No authentication configured — fully automated VM",
+            "ssh_pwauth: false",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = "none"
+        self.log.info("NoAuth: no password or SSH keys injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")

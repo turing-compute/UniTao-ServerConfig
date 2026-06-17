@@ -104,9 +104,11 @@ def _gen_net_json(bridge_name: str, bridge_data: dict, static_ip4: str = None, g
 
 def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
                  vm_host_name: str, vm_root: str,
-                 disk_file_name: str, net_file_name: str) -> dict:
+                 disk_file_name: str, net_file_name: str,
+                 auth_type: str = None, customer_pwd: str = None,
+                 customer_keys: list = None) -> dict:
     """Generate the main VM definition JSON per vm_data_sample.json."""
-    return {
+    vm_json = {
         "id": vm_name,
         "description": [],
         "vmPath": vm_root,
@@ -121,6 +123,13 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "osType": "linux",
         "osVariant": os_variant,
     }
+    if auth_type is not None:
+        vm_json["authType"] = auth_type
+    if customer_pwd is not None:
+        vm_json["customerPWD"] = customer_pwd
+    if customer_keys is not None:
+        vm_json["customerKeys"] = customer_keys
+    return vm_json
 
 
 def _query_virtual_size_gb(image_path: str, logger: logging.Logger) -> int:
@@ -202,6 +211,33 @@ def create_vm():
     # ── Optional fields ──
     ipv4 = data.get("ipv4", None)          # static IP in CIDR notation
     gateway4 = data.get("gateway4", None)  # gateway for static IP
+    auth_type = data.get("authType", None)
+    customer_pwd = data.get("customerPWD", None)
+    customer_keys = data.get("customerKeys", None)
+
+    # ── Validate authType ──
+    if auth_type is not None:
+        if auth_type not in KvmVm.Keyword.AuthTypes.list():
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"Invalid authType '{auth_type}', expected one of {KvmVm.Keyword.AuthTypes.list()}"}
+            }), 400
+        if auth_type == KvmVm.Keyword.AuthTypes.CustomerPWD:
+            if not customer_pwd or not isinstance(customer_pwd, str):
+                return jsonify({
+                    "success": False,
+                    "error": {"code": "VALIDATION_ERROR",
+                              "message": "authType=CustomerPWD requires 'customerPWD' to be a non-empty string"}
+                }), 400
+        if auth_type == KvmVm.Keyword.AuthTypes.CustomerKey:
+            if not customer_keys or not isinstance(customer_keys, list) or \
+               not all(isinstance(k, str) and k for k in customer_keys):
+                return jsonify({
+                    "success": False,
+                    "error": {"code": "VALIDATION_ERROR",
+                              "message": "authType=CustomerKey requires 'customerKeys' to be a non-empty array of strings"}
+                }), 400
 
     # ── Validate types ──
     for field_name, field_val in [("cpu", cpu), ("ramInGB", ram_gb)]:
@@ -260,7 +296,9 @@ def create_vm():
 
     # Main VM JSON.
     vm_json = _gen_vm_json(vm_id, cpu, ram_gb, os_variant, vm_host_name,
-                           vm_root, disk_file_name, net_file_name)
+                           vm_root, disk_file_name, net_file_name,
+                           auth_type=auth_type, customer_pwd=customer_pwd,
+                           customer_keys=customer_keys)
     vm_path = vm_json_path(current_app, vm_id)
     with open(vm_path, "w") as f:
         json.dump(vm_json, f, indent=4)
