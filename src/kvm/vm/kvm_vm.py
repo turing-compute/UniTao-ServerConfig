@@ -76,7 +76,8 @@ class KvmVm:
         return args
 
     def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys",
-                 auth_type: str = None, customer_pwd: str = None, customer_keys: list = None):
+                 auth_type: str = None, customer_pwd: str = None, customer_keys: list = None,
+                 share_inventory_data: bool = False, host_api_url: str = None):
         self.log = logger
         if data_path is None:
             args = KvmVm.parse_args()
@@ -92,6 +93,8 @@ class KvmVm:
         self._auth_type = auth_type
         self._customer_pwd = customer_pwd
         self._customer_keys = customer_keys
+        self._share_inventory_data = share_inventory_data
+        self._host_api_url = host_api_url
         self._key_manager = None
         self.Validate()
 
@@ -280,6 +283,9 @@ class KvmVm:
             else:
                 self._apply_random_pwd(user_data)
 
+        # Inject inventory config for VM-to-host data sharing.
+        self._apply_inventory_data(user_data)
+
         Util.write_file(user_data_path, "w", user_data)
         # Write VM data JSON back with login attribute.
         with open(self.DataPath, "w") as f:
@@ -355,6 +361,30 @@ class KvmVm:
         ])
         self.VmData[self.Keyword.Login] = "none"
         self.log.info("NoAuth: no password or SSH keys injected into cloud-init user-data")
+
+    def _apply_inventory_data(self, user_data: list):
+        if not self._share_inventory_data:
+            return
+        if not self._host_api_url:
+            self.log.warning("shareInventoryData=true but hostApiUrl not configured, skipping write_files")
+            return
+        inventory_config = json.dumps({
+            "hostApiUrl": self._host_api_url,
+            "vmId": self.VmName,
+        })
+        user_data.extend([
+            "# Inject inventory config for VM-to-host data sharing",
+            "write_files:",
+            "  - path: /opt/unitao-server-config/inventory.json",
+            "    content: |",
+        ])
+        for line in inventory_config.split("\n"):
+            user_data.append(f"      {line}")
+        user_data.extend([
+            "    permissions: '0644'",
+            ""
+        ])
+        self.log.info("Inventory config (write_files) injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")

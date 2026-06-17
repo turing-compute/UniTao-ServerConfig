@@ -208,6 +208,7 @@ def create_vm():
     auth_type = data.get("authType", None)
     customer_pwd = data.get("customerPWD", None)
     customer_keys = data.get("customerKeys", None)
+    share_inv = data.get("shareInventoryData", False)
 
     # ── Validate authType ──
     if auth_type is not None:
@@ -232,6 +233,15 @@ def create_vm():
                     "error": {"code": "VALIDATION_ERROR",
                               "message": "authType=CustomerKey requires 'customerKeys' to be a non-empty array of strings"}
                 }), 400
+
+    # ── Validate shareInventoryData ──
+    if not isinstance(share_inv, bool):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "'shareInventoryData' must be a boolean"}
+        }), 400
+    host_api_url = _get_config().get("hostApiUrl", None)
 
     # ── Validate types ──
     for field_name, field_val in [("cpu", cpu), ("ramInGB", ram_gb)]:
@@ -308,7 +318,8 @@ def create_vm():
     # ── Process (creates virsh VM) ──
     vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir(),
                auth_type=auth_type, customer_pwd=customer_pwd,
-               customer_keys=customer_keys)
+               customer_keys=customer_keys,
+               share_inventory_data=share_inv, host_api_url=host_api_url)
     vm.Process()
 
     status_code = 200 if already_exists else 201
@@ -337,16 +348,69 @@ def get_vm(name: str):
                 with open(file_path, "r") as fh:
                     data_files[f] = json.load(fh)
 
+    # Load inventory data from data/inventory/ subdirectory.
+    inventory = {}
+    inv_dir = os.path.join(data_dir, "inventory")
+    if os.path.isdir(inv_dir):
+        for f in sorted(os.listdir(inv_dir)):
+            if f.endswith(".json"):
+                file_path = os.path.join(inv_dir, f)
+                with open(file_path, "r") as fh:
+                    inventory[f] = json.load(fh)
+
     virsh_state = _get_virsh_state(name)
     result = {
         "name": name,
         "virshState": virsh_state,
     }
     result.update(data_files)
+    if inventory:
+        result["inventory"] = inventory
     return jsonify({
         "success": True,
         "data": result
     })
+
+
+@vm_bp.route("/<name>/inventory", methods=["POST"])
+def post_inventory(name: str):
+    """Accept inventory data from a VM and store it in data/inventory/."""
+    logger = _get_logger()
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+        }), 404
+
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
+        }), 400
+
+    inv_data = request.get_json()
+    if inv_data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
+        }), 400
+
+    data_dir = vm_data_dir(current_app, name)
+    inv_dir = os.path.join(data_dir, "inventory")
+    os.makedirs(inv_dir, exist_ok=True)
+
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    inv_file = os.path.join(inv_dir, f"{timestamp}.json")
+    with open(inv_file, "w") as f:
+        json.dump(inv_data, f, indent=4)
+
+    logger.info(f"Inventory data posted for VM [{name}] → {timestamp}.json")
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "file": f"{timestamp}.json"}
+    }), 201
 
 
 @vm_bp.route("/<name>", methods=["DELETE"])

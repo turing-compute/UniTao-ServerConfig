@@ -8,5 +8,6 @@
     "defaultBridge": "br0",
     "defaultRamInGB": 2,
     "keyDir": "/opt/kvm/keys",
-    "hostKeyDir": "/opt/unitiao/keys"
+    "hostKeyDir": "/opt/unitiao/keys",
+    "hostApiUrl": "http://192.168.2.101:5000"
 }
