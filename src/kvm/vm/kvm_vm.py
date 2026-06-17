@@ -374,6 +374,9 @@ class KvmVm:
         })
         user_data.extend([
             "# Inject inventory config for VM-to-host data sharing",
+            "# Ensure parent directory exists before write_files runs",
+            "bootcmd:",
+            "  - mkdir -p /opt/unitao-server-config",
             "write_files:",
             "  - path: /opt/unitao-server-config/inventory.json",
             "    content: |",
@@ -382,6 +385,7 @@ class KvmVm:
             user_data.append(f"      {line}")
         user_data.extend([
             "    permissions: '0644'",
+            "    owner: root:root",
             ""
         ])
         self.log.info("Inventory config (write_files) injected into cloud-init user-data")
