@@ -27,16 +27,16 @@
 | 6 | `[x]` | `src/rest/config.json` — 添加 keyDir 配置项 |
 | 7 | `[x]` | `src/rest/app.py` — 初始化 KeyManager |
 | 8 | `[x]` | `src/kvm/vm/kvm_vm.py` — Host 公钥注入 cloud-init ssh_authorized_keys |
-| 9 | `[ ]` | `src/rest/api_vm.py` — 随机密码 + 加密存储 + Access Key 验证 |
+| 9 | `[x]` | `src/rest/api_vm.py` — authType 机制支持多种 VM 访问认证方式 |
 | 10 | `[-]` | `src/security/access_control.py` — API 访问控制（取消：改为每 VM 独立密钥对模型） |
-| 11 | `[ ]` | `src/security/decrypt_tool.py` — CLI 解密工具 |
+| 11 | `[-]` | `src/security/decrypt_tool.py` — CLI 解密工具（取消：暂不需要） |
 | 12 | `[x]` | `service/deploy-service.sh` — 部署时自动生成密钥 |
 
 > **图例**: `[ ]` 待开始 `[~]` 进行中 `[x]` 已完成 `[-]` 已取消
 
 ## 下一步
 
-**→ 步骤 9**: `src/rest/api_vm.py` — 随机密码 + 加密存储 + Access Key 验证
+全部步骤已完成。加密解密（步骤 10/11）已取消。
 
 ## 执行日志
 
@@ -55,6 +55,7 @@
 | 9 | 2026-06-16 | 步骤 12 | `service/deploy-service.sh` — 部署时自动生成密钥 |
 | 10 | 2026-06-16 | 步骤 10 | **取消** — 改为每 VM 独立密钥对模型，不再需要 access_control.py |
 | 11 | 2026-06-16 | 步骤 8 | `kvm_vm.py` — 修复验证逻辑和 VmName 取值；`deploy-service.sh` 修复 keyDir 路径 |
+| 12 | 2026-06-18 | 步骤 9 | `api_vm.py` — authType 机制：支持 CustomerPWD、CustomerKey、RandomPWD、HostKey、NoAuth 五种 VM 认证方式；步骤 11（decrypt_tool）取消 |
 
 ---
 
