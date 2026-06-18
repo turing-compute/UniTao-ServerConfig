@@ -373,6 +373,12 @@ class KvmVm:
             "hostApiUrl": self._host_api_url,
             "vmId": self.VmName,
         })
+        # Read inventory_tool.py for injection into VM.
+        import base64
+        tool_src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                "security", "inventory_tool.py")
+        with open(tool_src, "rb") as f:
+            tool_b64 = base64.b64encode(f.read()).decode()
         user_data.extend([
             "# Inject inventory config for VM-to-host data sharing",
             "runcmd:",
@@ -381,6 +387,10 @@ class KvmVm:
             "  - path: /opt/unitao-server-config/inventory.json",
             "    permissions: '0644'",
             f"    content: '{inventory_config}'",
+            "  - path: /opt/unitao-server-config/inventory_tool.py",
+            "    permissions: '0755'",
+            "    encoding: b64",
+            f"    content: {tool_b64}",
             ""
         ])
         # Persist inventory settings so subsequent calls (PATCH/start/stop) can restore them.
