@@ -93,8 +93,9 @@ class KvmVm:
         self._auth_type = auth_type
         self._customer_pwd = customer_pwd
         self._customer_keys = customer_keys
-        self._share_inventory_data = share_inventory_data
-        self._host_api_url = host_api_url
+        # Fall back to VmData for inventory settings (persisted from previous run).
+        self._share_inventory_data = share_inventory_data or self.VmData.get("shareInventoryData", False)
+        self._host_api_url = host_api_url or self.VmData.get("hostApiUrl", None)
         self._key_manager = None
         self.Validate()
 
@@ -382,6 +383,9 @@ class KvmVm:
             f"    content: '{inventory_config}'",
             ""
         ])
+        # Persist inventory settings so subsequent calls (PATCH/start/stop) can restore them.
+        self.VmData["shareInventoryData"] = True
+        self.VmData["hostApiUrl"] = self._host_api_url
         self.log.info("Inventory config (write_files + runcmd) injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
