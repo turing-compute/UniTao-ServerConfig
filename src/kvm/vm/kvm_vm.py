@@ -213,8 +213,8 @@ class KvmVm:
             return
         ci_iso_file = self.VmData[self.Keyword.CIIsoPath]
         if os.path.exists(ci_iso_file):
-            self.log.info(f"VM Cloud Init iso already exists.return. [{ci_iso_file}]")
-            return
+            self.log.info(f"VM Cloud Init iso already exists, removing to regenerate. [{ci_iso_file}]")
+            os.remove(ci_iso_file)
         user_data_path = self.create_ci_user_data()
         meta_data_path = self.create_ci_meta_data()
         net_config_path = self.create_ci_network_config()
