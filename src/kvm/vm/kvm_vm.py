@@ -376,10 +376,13 @@ class KvmVm:
             "# Inject inventory config for VM-to-host data sharing",
             "runcmd:",
             "  - mkdir -p /opt/unitao-server-config",
-            f"  - echo '{inventory_config}' > /opt/unitao-server-config/inventory.json",
+            "write_files:",
+            "  - path: /opt/unitao-server-config/inventory.json",
+            "    permissions: '0644'",
+            f"    content: '{inventory_config}'",
             ""
         ])
-        self.log.info("Inventory config (runcmd) injected into cloud-init user-data")
+        self.log.info("Inventory config (write_files + runcmd) injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")

@@ -14,7 +14,7 @@ from rest.api_bridge import bridge_bp
 from rest.api_utils import utils_bp
 
 # Config keys that are directory paths and should be resolved to absolute paths.
-_DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "bridgeDataDir", "keyDir", "hostKeyDir"]
+_DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "bridgeDataDir", "hostKeyDir"]
 
 
 def load_config(config_path: str = None) -> dict:
