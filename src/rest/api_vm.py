@@ -48,7 +48,8 @@ def _get_virsh_state(vm_name: str) -> str:
 
 # ── JSON generators (POST params → definition files per vm_data_sample.json) ──
 
-def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: logging.Logger) -> dict:
+def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: logging.Logger,
+                    disk_size_gb: int = None) -> dict:
     """Generate a disk JSON that references an existing managed image as backing file."""
     base_image_path_rel = base_image_data.get("imagePath", "")
     image_format = base_image_data.get("imageFormat", "qcow2")
@@ -56,12 +57,18 @@ def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: lo
     disk_filename = f"{disk_name}.qcow2"
     disk_image_path = os.path.join(vm_root, disk_filename)
 
-    # Try to read virtual size from the base image file.
-    size_gb = 20  # fallback default
+    # Resolve the backing image absolute path (needed for relpath below).
+    abs_base_path = None
     if base_image_path_rel:
         image_data_dir = get_data_dir(current_app, "image")
         abs_base_path = os.path.normpath(os.path.join(image_data_dir, base_image_path_rel))
-        if os.path.exists(abs_base_path):
+
+    # Use explicit diskSizeGB if provided, otherwise query base image virtual size.
+    if disk_size_gb is not None and disk_size_gb > 0:
+        size_gb = disk_size_gb
+    else:
+        size_gb = 20  # fallback default
+        if abs_base_path is not None and os.path.exists(abs_base_path):
             size_gb = _query_virtual_size_gb(abs_base_path, logger)
 
     # Store paths relative to the disk JSON's own directory.
@@ -205,6 +212,7 @@ def create_vm():
     # ── Optional fields ──
     ipv4 = data.get("ipv4", None)          # static IP in CIDR notation
     gateway4 = data.get("gateway4", None)  # gateway for static IP
+    disk_size_gb = data.get("diskSizeGB", None)  # override disk size (reads base image size if omitted)
     auth_type = data.get("authType", None)
     customer_pwd = data.get("customerPWD", None)
     customer_keys = data.get("customerKeys", None)
@@ -242,6 +250,14 @@ def create_vm():
                       "message": "'shareInventoryData' must be a boolean"}
         }), 400
     host_api_url = _get_config().get("hostApiUrl", None)
+
+    # ── Validate diskSizeGB type ──
+    if disk_size_gb is not None and (not isinstance(disk_size_gb, int) or disk_size_gb < 1):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "'diskSizeGB' must be a positive integer"}
+        }), 400
 
     # ── Validate types ──
     for field_name, field_val in [("cpu", cpu), ("ramInGB", ram_gb)]:
@@ -284,7 +300,7 @@ def create_vm():
 
     # ── Generate definition files ──
     # Disk JSON (named after the base image).
-    disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger)
+    disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger, disk_size_gb)
     disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
     disk_file_name = f"disk-{disk_base}.json"
     disk_path = os.path.join(data_dir, disk_file_name)
