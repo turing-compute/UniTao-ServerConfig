@@ -93,8 +93,9 @@ class KvmVm:
         self._auth_type = auth_type
         self._customer_pwd = customer_pwd
         self._customer_keys = customer_keys
-        self._share_inventory_data = share_inventory_data
-        self._host_api_url = host_api_url
+        # Fall back to VmData for inventory settings (persisted from previous run).
+        self._share_inventory_data = share_inventory_data or self.VmData.get("shareInventoryData", False)
+        self._host_api_url = host_api_url or self.VmData.get("hostApiUrl", None)
         self._key_manager = None
         self.Validate()
 
@@ -213,8 +214,8 @@ class KvmVm:
             return
         ci_iso_file = self.VmData[self.Keyword.CIIsoPath]
         if os.path.exists(ci_iso_file):
-            self.log.info(f"VM Cloud Init iso already exists.return. [{ci_iso_file}]")
-            return
+            self.log.info(f"VM Cloud Init iso already exists, removing to regenerate. [{ci_iso_file}]")
+            os.remove(ci_iso_file)
         user_data_path = self.create_ci_user_data()
         meta_data_path = self.create_ci_meta_data()
         net_config_path = self.create_ci_network_config()
@@ -372,14 +373,30 @@ class KvmVm:
             "hostApiUrl": self._host_api_url,
             "vmId": self.VmName,
         })
+        # Read inventory_tool.py for injection into VM.
+        import base64
+        tool_src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                "security", "inventory_tool.py")
+        with open(tool_src, "rb") as f:
+            tool_b64 = base64.b64encode(f.read()).decode()
         user_data.extend([
             "# Inject inventory config for VM-to-host data sharing",
             "runcmd:",
             "  - mkdir -p /opt/unitao-server-config",
-            f"  - echo '{inventory_config}' > /opt/unitao-server-config/inventory.json",
+            "write_files:",
+            "  - path: /opt/unitao-server-config/inventory.json",
+            "    permissions: '0644'",
+            f"    content: '{inventory_config}'",
+            "  - path: /opt/unitao-server-config/inventory_tool.py",
+            "    permissions: '0755'",
+            "    encoding: b64",
+            f"    content: {tool_b64}",
             ""
         ])
-        self.log.info("Inventory config (runcmd) injected into cloud-init user-data")
+        # Persist inventory settings so subsequent calls (PATCH/start/stop) can restore them.
+        self.VmData["shareInventoryData"] = True
+        self.VmData["hostApiUrl"] = self._host_api_url
+        self.log.info("Inventory config (write_files + runcmd) injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")

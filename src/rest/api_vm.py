@@ -372,6 +372,53 @@ def get_vm(name: str):
     })
 
 
+@vm_bp.route("/<name>/inventory", methods=["GET"])
+def list_inventory(name: str):
+    """List all inventory file names for a VM."""
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+        }), 404
+
+    data_dir = vm_data_dir(current_app, name)
+    inv_dir = os.path.join(data_dir, "inventory")
+    files = []
+    if os.path.isdir(inv_dir):
+        files = sorted([f for f in os.listdir(inv_dir) if f.endswith(".json")])
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "files": files}
+    })
+
+
+@vm_bp.route("/<name>/inventory/<filename>", methods=["GET"])
+def get_inventory_file(name: str, filename: str):
+    """Get a specific inventory file for a VM."""
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+        }), 404
+
+    data_dir = vm_data_dir(current_app, name)
+    inv_file = os.path.join(data_dir, "inventory", filename)
+    if not os.path.isfile(inv_file):
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"File '{filename}' not found"}
+        }), 404
+
+    with open(inv_file, "r") as f:
+        content = json.load(f)
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "file": filename, "content": content}
+    })
+
+
 @vm_bp.route("/<name>/inventory", methods=["POST"])
 def post_inventory(name: str):
     """Accept inventory data from a VM and store it in data/inventory/."""
