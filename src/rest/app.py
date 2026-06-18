@@ -44,6 +44,30 @@ def _ensure_data_dirs(config: dict):
             os.makedirs(d, exist_ok=True)
 
 
+def _recover_vms_after_reboot(app, logger):
+    """After host reboot, restart VMs whose desired state is 'running'."""
+    from rest.service import list_entities, vm_json_path
+    from kvm.vm.kvm_vm import KvmVm
+
+    host_key_dir = app.config["CONFIG"].get("hostKeyDir", "/opt/unitiao/keys")
+    for vm_name in list_entities(app, "vm"):
+        try:
+            vm_path = vm_json_path(app, vm_name)
+            with open(vm_path, "r") as f:
+                import json as _json
+                data = _json.load(f)
+        except Exception:
+            continue
+        if data.get("vmState") != "running":
+            continue
+        logger.warning("Recovering VM [%s] after host reboot", vm_name)
+        try:
+            vm = KvmVm(logger, vm_path, key_dir=host_key_dir)
+            vm.Process()
+        except Exception as e:
+            logger.error("Failed to recover VM [%s]: %s", vm_name, e)
+
+
 def create_app(config: dict = None) -> Flask:
     if config is None:
         config = load_config()
@@ -66,6 +90,7 @@ def create_app(config: dict = None) -> Flask:
     app.config["CONFIG"] = config
     app.config["KEY_MANAGER"] = key_manager
     recover_stale_images(app)
+    _recover_vms_after_reboot(app, logger)
     app.config["CONFIG"] = config
     app.config["JSONIFY_PRETTYPRINT_REGULAR"] = True
 
