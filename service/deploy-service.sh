@@ -4,7 +4,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SERVICE_NAME="unitiao-kvm-host"
+SERVICE_NAME="unitao-kvm-host"
 TEMPLATE_SERVICE="$SCRIPT_DIR/${SERVICE_NAME}.service"
 DEFAULT_CONFIG="$REPO_ROOT/src/rest/config.json"
 SYSTEMD_TARGET="/etc/systemd/system/${SERVICE_NAME}.service"
