@@ -45,8 +45,8 @@ UniTao-ServerConfig 创建的 VM 之间可能需要组建 VPN 网络。WireGuard
 
 | 步骤 | 状态 | 内容 |
 |------|------|------|
-| 1 | `[ ]` | `src/rest/api_vm.py` — inventory API 支持按 name 存储文件 |
-| 2 | `[ ]` | `src/rest/api_image.py` — image commit API：将 VM 磁盘增量提交回 base image |
+| 1 | `[x]` | `src/rest/api_vm.py` — inventory API：按 name 存储 + 返回文件修改时间戳 |
+| 2 | `[x]` | `src/rest/api_vm.py` — VM commit API + `src/kvm/image/prep_image_for_commit.py` + `src/domain/wireguard/prep_image_for_commit.py` — commit 前清理 |
 | 3.1 | `[ ]` | `src/domain/wireguard/wg_data.py` — 纯数据模型：IP 工具函数、WgNetworkConfig、WgPeerData |
 | 3.2 | `[ ]` | `src/domain/wireguard/wg_config_file.py` — WgConfigFile：wireguard_config.json |
 | 3.3 | `[ ]` | `src/domain/wireguard/wg_key_manager.py` — WgKeyManager：VM 侧密钥对管理 |
@@ -98,52 +98,46 @@ else:
 
 ---
 
-### 步骤 2: `src/rest/api_image.py` — Image Commit API
+### 步骤 2: `src/rest/api_vm.py` — VM Commit API
 
 **用途**: 在 WireGuard base image 准备流程中，将已安装 wg_agent 的 VM 磁盘变更提交回 base image。
 
 **工作流**:
 ```
-创建 VM (from base image) → 安装 WireGuard + wg_agent → 关机 → virsh destroy
-  → POST /api/v1/images/{imageName}/commit  { "vmId": "vm-wg-base" }
-  → qemu-img commit 将 VM 磁盘增量合并到 base image
+创建 VM (from base image)
+  → 安装系统依赖: apt install wireguard-tools
+  → python3 install.py --network wg-mesh --agent wg_agent.py --config wg-mesh.json
+     (创建 /opt/unitao/, 复制 agent + config, 创建 systemd unit)
+  → python3 prep_image_for_commit.py --network wg-mesh --force
+     (WireGuard 级清理: 删除 WG 密钥、agent 运行时产物)
+  → python3 prep_image_for_commit.py --force
+     (VM 级清理: SSH host key、machine-id、cloud-init state 等)
+  → 关机 → virsh destroy
+  → POST /api/v1/vms/{vmName}/commit {"disk": 0}
   → base image 即为 "WireGuard-ready" image
 ```
 
 **前置条件**:
 - VM 存在，且 `vmState == "stopped"`
 - virsh 中该 VM 不存在（`virsh list --all` 不包含该 VM，即已 destroy）
-- VM 的磁盘是 qcow2 格式，且基于目标 base image（有 backing file）
+- VM 的磁盘是 qcow2 格式且有 backing file
 - 不满足任一条件返回 400
 
-**端点**: `POST /api/v1/images/<imageName>/commit`
+**端点**: `POST /api/v1/vms/<vmName>/commit`
 
-请求体:
-```json
-{
-  "vmId": "vm-wg-base"
-}
-```
+无请求体。Backing image 从 qemu-img info 自动检测。
 
 处理逻辑:
 ```python
-@image_bp.route("/<image_name>/commit", methods=["POST"])
-def commit_image(image_name: str):
-    # 1. 验证 base image 存在
-    # 2. 获取 vmId，验证 VM 存在
-    # 3. 验证 vmState == "stopped"
-    # 4. 验证 virsh list --all 不包含该 VM（已 destroy）
-    # 5. 从 VM JSON 的 disks[0] 找到 disk image 路径
-    # 6. 验证 disk image 的 backing file 指向目标 base image
-    # 7. 执行 qemu-img commit -b <backing_file> <disk_image>
-    # 8. 更新 base image JSON（如 size、timestamp）
-    # 9. 返回成功
+@vm_bp.route("/<name>/commit", methods=["POST"])
+def commit_vm_image(name: str):
+    # 1. 验证 VM 存在 + vmState == "stopped"
+    # 2. 验证 virsh 中 VM 不存在（已 destroy）
+    # 3. 从 VM JSON disks[0] 解析 disk JSON → 获取 qcow2 路径
+    # 4. qemu-img info 获取 backing file 路径
+    # 5. qemu-img commit <disk_image>
+    # 6. 更新 backing image JSON（lastCommitFrom, lastCommitAt）
 ```
-
-**验证**:
-- VM running 时调用 → 400
-- VM 未 destroy 时调用 → 400
-- 正常 destroy 后调用 → qemu-img commit 成功，base image 更新
 
 ---
 
@@ -612,15 +606,19 @@ PersistentKeepalive = 25
 
 ```
 src/rest/
-    api_vm.py              # 步骤 1: inventory name 存储 (修改)
-    api_image.py           # 步骤 2: image commit API (新增端点)
+    api_vm.py              # 步骤 1: inventory name 存储 + 步骤 2: commit API
+
+src/kvm/image/
+    prep_image_for_commit.py          # 步骤 2: VM 级 commit 前清理
 
 src/domain/wireguard/
     __init__.py            # 空 (已存在)
-    wg_data.py             # 步骤 3.1: IP 工具 + WgNetworkConfig + WgPeerData      (~175 行)
-    wg_config_file.py      # 步骤 3.2: WgConfigFile                                  (~55 行)
-    wg_key_manager.py      # 步骤 3.3: WgKeyManager                                  (~85 行)
-    wg_config_builder.py   # 步骤 3.4: WgConfigBuilder                               (~65 行)
+    wg_data.py             # 步骤 3.1: IP 工具 + WgNetworkConfig + WgPeerData
+    wg_config_file.py      # 步骤 3.2: WgConfigFile
+    wg_key_manager.py      # 步骤 3.3: WgKeyManager
+    wg_config_builder.py   # 步骤 3.4: WgConfigBuilder
+    install.py            # 步骤 2: 安装 agent 到 image
+    prep_image_for_commit.py          # 步骤 2: WireGuard 级 commit 前清理
     wg_agent.py            # 步骤 4: VM Agent
     wg_agent_service.py    # 步骤 5: systemd 化
 ```

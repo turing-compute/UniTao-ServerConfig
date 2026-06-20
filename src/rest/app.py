@@ -11,6 +11,7 @@ from shared.logger import Log
 from rest.api_vm import vm_bp
 from rest.api_image import image_bp, recover_stale_images
 from rest.api_bridge import bridge_bp
+from rest.api_schema import schema_bp
 from rest.api_utils import utils_bp
 
 # Config keys that are directory paths and should be resolved to absolute paths.
@@ -110,6 +111,7 @@ def create_app(config: dict = None) -> Flask:
             }
         })
 
+    app.register_blueprint(schema_bp, url_prefix="/api/v1")
     app.register_blueprint(vm_bp, url_prefix="/api/v1/vms")
     app.register_blueprint(image_bp, url_prefix="/api/v1/images")
     app.register_blueprint(bridge_bp, url_prefix="/api/v1/bridges")

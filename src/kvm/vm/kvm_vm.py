@@ -77,7 +77,8 @@ class KvmVm:
 
     def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys",
                  auth_type: str = None, customer_pwd: str = None, customer_keys: list = None,
-                 share_inventory_data: bool = False, host_api_url: str = None):
+                 share_inventory_data: bool = False, host_api_url: str = None,
+                 prepare_domain_image: bool = False):
         self.log = logger
         if data_path is None:
             args = KvmVm.parse_args()
@@ -96,6 +97,7 @@ class KvmVm:
         # Fall back to VmData for inventory settings (persisted from previous run).
         self._share_inventory_data = share_inventory_data or self.VmData.get("shareInventoryData", False)
         self._host_api_url = host_api_url or self.VmData.get("hostApiUrl", None)
+        self._prepare_domain_image = prepare_domain_image or self.VmData.get("prepareDomainImage", False)
         self._key_manager = None
         self.Validate()
 
@@ -287,6 +289,9 @@ class KvmVm:
         # Inject inventory config for VM-to-host data sharing.
         self._apply_inventory_data(user_data)
 
+        # Inject domain image preparation script.
+        self._apply_prep_image_data(user_data)
+
         Util.write_file(user_data_path, "w", user_data)
         # Write VM data JSON back with login attribute.
         with open(self.DataPath, "w") as f:
@@ -397,6 +402,27 @@ class KvmVm:
         self.VmData["shareInventoryData"] = True
         self.VmData["hostApiUrl"] = self._host_api_url
         self.log.info("Inventory config (write_files + runcmd) injected into cloud-init user-data")
+
+    def _apply_prep_image_data(self, user_data: list):
+        """Inject prep_image_for_commit.py for domain image preparation."""
+        if not self._prepare_domain_image:
+            return
+        import base64
+        prep_src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                "kvm", "image", "prep_image_for_commit.py")
+        with open(prep_src, "rb") as f:
+            prep_b64 = base64.b64encode(f.read()).decode()
+        user_data.extend([
+            "# Inject domain image preparation script",
+            "write_files:",
+            "  - path: /opt/unitao-server-config/prep_image_for_commit.py",
+            "    permissions: '0755'",
+            "    encoding: b64",
+            f"    content: {prep_b64}",
+            ""
+        ])
+        self.VmData["prepareDomainImage"] = True
+        self.log.info("prep_image_for_commit.py injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")
