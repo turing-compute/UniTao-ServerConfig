@@ -194,12 +194,12 @@ def create_vm():
     vm_host_name = data.get("vmHostName", None)
     os_image = data.get("osImage", None)
     os_variant = data.get("osVariant", None)
-    bridge_name = data.get("bridge", None)
+    bridge_name = data.get("bridge", None) or _get_config().get("defaultBridge", None)
 
     required = [
         ("id", vm_id), ("cpu", cpu), ("ramInGB", ram_gb),
         ("vmHostName", vm_host_name), ("osImage", os_image),
-        ("osVariant", os_variant), ("bridge", bridge_name),
+        ("osVariant", os_variant),
     ]
     for field_name, field_val in required:
         if field_val is None:
@@ -208,6 +208,13 @@ def create_vm():
                 "error": {"code": "VALIDATION_ERROR",
                           "message": f"Missing required field '{field_name}'"}
             }), 400
+
+    if not bridge_name:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "No bridge specified and no defaultBridge in config"}
+        }), 400
 
     # ── Optional fields ──
     ipv4 = data.get("ipv4", None)          # static IP in CIDR notation

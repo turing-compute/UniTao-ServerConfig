@@ -286,11 +286,23 @@ class KvmVm:
             else:
                 self._apply_random_pwd(user_data)
 
+        # Collect write_files and runcmd entries for cloud-init.
+        write_files = []
+        run_commands = []
+
         # Inject inventory config for VM-to-host data sharing.
-        self._apply_inventory_data(user_data)
+        self._apply_inventory_data(user_data, write_files, run_commands)
 
         # Inject domain image preparation script.
-        self._apply_prep_image_data(user_data)
+        self._apply_prep_image_data(user_data, write_files, run_commands)
+
+        # Output merged write_files and runcmd.
+        if write_files:
+            user_data.append("write_files:")
+            user_data.extend(write_files)
+        if run_commands:
+            user_data.append("runcmd:")
+            user_data.extend(run_commands)
 
         Util.write_file(user_data_path, "w", user_data)
         # Write VM data JSON back with login attribute.
@@ -368,7 +380,7 @@ class KvmVm:
         self.VmData[self.Keyword.Login] = "none"
         self.log.info("NoAuth: no password or SSH keys injected into cloud-init user-data")
 
-    def _apply_inventory_data(self, user_data: list):
+    def _apply_inventory_data(self, user_data: list, write_files: list, run_commands: list):
         if not self._share_inventory_data:
             return
         if not self._host_api_url:
@@ -378,17 +390,20 @@ class KvmVm:
             "hostApiUrl": self._host_api_url,
             "vmId": self.VmName,
         })
-        # Read inventory_tool.py for injection into VM.
+        # Read inventory_tool.py and report_network.py for injection.
         import base64
-        tool_src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                                "security", "inventory_tool.py")
+        src_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        tool_src = os.path.join(src_root, "security", "inventory_tool.py")
+        report_src = os.path.join(src_root, "service", "report_network.py")
         with open(tool_src, "rb") as f:
             tool_b64 = base64.b64encode(f.read()).decode()
-        user_data.extend([
-            "# Inject inventory config for VM-to-host data sharing",
-            "runcmd:",
+        with open(report_src, "rb") as f:
+            report_b64 = base64.b64encode(f.read()).decode()
+        run_commands.extend([
             "  - mkdir -p /opt/unitao-server-config",
-            "write_files:",
+            "  - python3 /opt/unitao-server-config/report_network.py",
+        ])
+        write_files.extend([
             "  - path: /opt/unitao-server-config/inventory.json",
             "    permissions: '0644'",
             f"    content: '{inventory_config}'",
@@ -396,14 +411,17 @@ class KvmVm:
             "    permissions: '0755'",
             "    encoding: b64",
             f"    content: {tool_b64}",
-            ""
+            "  - path: /opt/unitao-server-config/report_network.py",
+            "    permissions: '0755'",
+            "    encoding: b64",
+            f"    content: {report_b64}",
         ])
         # Persist inventory settings so subsequent calls (PATCH/start/stop) can restore them.
         self.VmData["shareInventoryData"] = True
         self.VmData["hostApiUrl"] = self._host_api_url
         self.log.info("Inventory config (write_files + runcmd) injected into cloud-init user-data")
 
-    def _apply_prep_image_data(self, user_data: list):
+    def _apply_prep_image_data(self, user_data: list, write_files: list, run_commands: list):
         """Inject prep_image_for_commit.py for domain image preparation."""
         if not self._prepare_domain_image:
             return
@@ -412,14 +430,11 @@ class KvmVm:
                                 "kvm", "image", "prep_image_for_commit.py")
         with open(prep_src, "rb") as f:
             prep_b64 = base64.b64encode(f.read()).decode()
-        user_data.extend([
-            "# Inject domain image preparation script",
-            "write_files:",
+        write_files.extend([
             "  - path: /opt/unitao-server-config/prep_image_for_commit.py",
             "    permissions: '0755'",
             "    encoding: b64",
             f"    content: {prep_b64}",
-            ""
         ])
         self.VmData["prepareDomainImage"] = True
         self.log.info("prep_image_for_commit.py injected into cloud-init user-data")
