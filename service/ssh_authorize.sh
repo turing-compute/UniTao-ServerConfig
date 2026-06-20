@@ -29,10 +29,10 @@ if [ ! -f "$PEM_FILE" ]; then
     exit 1
 fi
 
-# Convert PEM to OpenSSH single-line format.
-OPENSSH_KEY=$(ssh-keygen -i -m PKCS8 -f "$PEM_FILE" 2>/dev/null)
-if [ -z "$OPENSSH_KEY" ]; then
-    echo "ERROR: failed to convert $PEM_FILE to OpenSSH format"
+# Compute fingerprint from PEM for reliable matching.
+FINGERPRINT=$(ssh-keygen -l -f "$PEM_FILE" 2>/dev/null | awk '{print $2}')
+if [ -z "$FINGERPRINT" ]; then
+    echo "ERROR: failed to compute fingerprint for $PEM_FILE"
     exit 1
 fi
 
@@ -42,19 +42,23 @@ touch "$AUTH_KEYS"
 
 case "$ACTION" in
     add)
-        if grep -qF "$OPENSSH_KEY" "$AUTH_KEYS"; then
+        if ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null | grep -qF "$FINGERPRINT"; then
             echo "Key already present in $AUTH_KEYS (skipped)"
         else
+            OPENSSH_KEY=$(ssh-keygen -i -m PKCS8 -f "$PEM_FILE")
             echo "$OPENSSH_KEY" >> "$AUTH_KEYS"
             echo "Key added to $AUTH_KEYS"
         fi
         ;;
     remove)
-        if grep -qF "$OPENSSH_KEY" "$AUTH_KEYS"; then
-            TMPFILE=$(mktemp)
-            grep -vF "$OPENSSH_KEY" "$AUTH_KEYS" > "$TMPFILE"
-            mv "$TMPFILE" "$AUTH_KEYS"
-            echo "Key removed from $AUTH_KEYS"
+        if ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null | grep -qF "$FINGERPRINT"; then
+            LINE_NUM=$(ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null | grep -nF "$FINGERPRINT" | head -1 | cut -d: -f1)
+            if [ -n "$LINE_NUM" ]; then
+                TMPFILE=$(mktemp)
+                sed "${LINE_NUM}d" "$AUTH_KEYS" > "$TMPFILE"
+                mv "$TMPFILE" "$AUTH_KEYS"
+                echo "Key removed from $AUTH_KEYS"
+            fi
         else
             echo "Key not found in $AUTH_KEYS (skipped)"
         fi
