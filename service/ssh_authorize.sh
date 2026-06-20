@@ -29,8 +29,15 @@ if [ ! -f "$PEM_FILE" ]; then
     exit 1
 fi
 
-# Compute fingerprint from PEM for reliable matching.
-FINGERPRINT=$(ssh-keygen -l -f "$PEM_FILE" 2>/dev/null | awk '{print $2}')
+# Convert PEM to OpenSSH single-line format.
+OPENSSH_KEY=$(ssh-keygen -i -m PKCS8 -f "$PEM_FILE" 2>/dev/null)
+if [ -z "$OPENSSH_KEY" ]; then
+    echo "ERROR: failed to convert $PEM_FILE to OpenSSH format"
+    exit 1
+fi
+
+# Compute fingerprint from OpenSSH key for reliable matching.
+FINGERPRINT=$(echo "$OPENSSH_KEY" | ssh-keygen -l -f /dev/stdin 2>/dev/null | awk '{print $2}')
 if [ -z "$FINGERPRINT" ]; then
     echo "ERROR: failed to compute fingerprint for $PEM_FILE"
     exit 1
@@ -45,7 +52,6 @@ case "$ACTION" in
         if ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null | grep -qF "$FINGERPRINT"; then
             echo "Key already present in $AUTH_KEYS (skipped)"
         else
-            OPENSSH_KEY=$(ssh-keygen -i -m PKCS8 -f "$PEM_FILE")
             echo "$OPENSSH_KEY" >> "$AUTH_KEYS"
             echo "Key added to $AUTH_KEYS"
         fi
