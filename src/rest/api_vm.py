@@ -360,10 +360,17 @@ def create_vm():
 def get_vm(name: str):
     vm_def = read_entity_data(current_app, "vm", name)
     if vm_def is None:
+        # Check if the VM exists in virsh (unmanaged).
+        virsh_state = _get_virsh_state(name)
+        if virsh_state == KvmVm.Keyword.VmStates.NotExists:
+            return jsonify({
+                "success": False,
+                "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+            }), 404
         return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
-        }), 404
+            "success": True,
+            "data": {"name": name, "virshState": virsh_state, "managed": False}
+        })
 
     # Load all JSON files from the VM's data directory.
     data_dir = vm_data_dir(current_app, name)
