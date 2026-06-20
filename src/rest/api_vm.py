@@ -519,26 +519,42 @@ def post_inventory(name: str):
 def delete_vm(name: str):
     logger = _get_logger()
     data = read_entity_data(current_app, "vm", name)
-    if data is None:
+
+    # Managed VM: full cleanup (virsh destroy + remove data dir).
+    if data is not None:
+        data["vmState"] = KvmVm.Keyword.VmStates.NotExists
+        write_entity_data(current_app, "vm", name, data)
+        vm_path = vm_json_path(current_app, name)
+        vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
+        vm.Process()
+        vm_root = vm_dir(current_app, name)
+        if os.path.isdir(vm_root):
+            Util.run_command(f"rm -rf {vm_root}")
+        return jsonify({
+            "success": True,
+            "data": {"name": name, "deleted": True, "managed": True}
+        })
+
+    # Unmanaged VM: just destroy via virsh.
+    virsh_state = _get_virsh_state(name)
+    if virsh_state == KvmVm.Keyword.VmStates.NotExists:
         return jsonify({
             "success": False,
             "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
         }), 404
 
-    data["vmState"] = KvmVm.Keyword.VmStates.NotExists
-    write_entity_data(current_app, "vm", name, data)
-
-    vm_path = vm_json_path(current_app, name)
-    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
-    vm.Process()
-
-    vm_root = vm_dir(current_app, name)
-    if os.path.isdir(vm_root):
-        Util.run_command(f"rm -rf {vm_root}")
+    logger.info(f"Destroying unmanaged VM [{name}] (virsh state: {virsh_state})")
+    if virsh_state == KvmVm.Keyword.VmStates.Running:
+        Util.run_command(f"virsh destroy {name}")
+    # Undefine to remove from virsh (ignore if already gone).
+    try:
+        Util.run_command(f"virsh undefine {name}")
+    except SystemError:
+        pass
 
     return jsonify({
         "success": True,
-        "data": {"name": name, "deleted": True}
+        "data": {"name": name, "deleted": True, "managed": False}
     })
 
 
