@@ -1,14 +1,10 @@
-"""REST API schema — self-documenting endpoint metadata.
-
-Served at GET /api/v1/ to help API consumers understand all available
-endpoints, their parameters, and response formats.
-"""
+"""REST API schema — self-documenting endpoint metadata."""
 
 from extlib.flask import Blueprint, jsonify
 
 schema_bp = Blueprint("schema", __name__)
 
-SCHEMA = {
+_API_SCHEMA = {
     "service": "UniTao KVM Host",
     "version": "1.0",
     "basePath": "/api/v1",
@@ -16,179 +12,59 @@ SCHEMA = {
         "vms": {
             "description": "Virtual machine lifecycle management",
             "endpoints": {
-                "list": {
-                    "method": "GET",
-                    "path": "/api/v1/vms",
-                    "description": "List all VMs (managed + virsh-only)",
-                    "response": {"vms": "[{name, virshState, managed}]"},
-                },
-                "create": {
-                    "method": "POST",
-                    "path": "/api/v1/vms",
-                    "description": "Create or update a VM",
-                    "body": {
-                        "id": "string (required) — VM identifier",
-                        "cpu": "int (required) — vCPU count",
-                        "ramInGB": "int (required) — RAM in GB",
-                        "vmHostName": "string (required) — hostname",
-                        "osImage": "string (required) — managed image name",
-                        "osVariant": "string (required) — e.g. ubuntu24.04",
-                        "bridge": "string (required) — bridge name",
-                        "ipv4": "string (optional) — static IP in CIDR, e.g. 192.168.1.10/24",
-                        "gateway4": "string (optional) — gateway IP",
-                        "diskSizeGB": "int (optional) — override disk size",
-                        "authType": "string (optional) — CustomerPWD | RandomPWD | HostKey | CustomerKey | NoAuth",
-                        "customerPWD": "string (required if authType=CustomerPWD)",
-                        "customerKeys": "[string] (required if authType=CustomerKey)",
-                        "shareInventoryData": "bool (default false) — inject inventory_tool.py",
-                        "prepareDomainImage": "bool (default false) — inject prep_image_for_commit.py",
-                    },
-                    "response": {"name": "string", "vmPath": "string"},
-                },
-                "get": {
-                    "method": "GET",
-                    "path": "/api/v1/vms/<name>",
-                    "description": "Get VM details including virsh state, disk/net JSONs, inventory",
-                    "response": {"name": "string", "virshState": "string", "...": "data files"},
-                },
-                "delete": {
-                    "method": "DELETE",
-                    "path": "/api/v1/vms/<name>",
-                    "description": "Delete a VM (destroy in virsh + remove data dir)",
-                    "response": {"name": "string", "deleted": "true"},
-                },
-                "start": {
-                    "method": "POST",
-                    "path": "/api/v1/vms/<name>/start",
-                    "description": "Start a VM (set vmState=running and process)",
-                    "response": {"name": "string", "vmState": "running"},
-                },
-                "stop": {
-                    "method": "POST",
-                    "path": "/api/v1/vms/<name>/stop",
-                    "description": "Stop a VM (set vmState=stopped and process)",
-                    "response": {"name": "string", "vmState": "stopped"},
-                },
-                "patch": {
-                    "method": "PATCH",
-                    "path": "/api/v1/vms",
-                    "description": "Patch VM state (start/stop by id)",
-                    "body": {
-                        "id": "string (required) — VM identifier",
-                        "vmState": "string (required) — 'running' or 'stopped'",
-                    },
-                    "response": {"name": "string", "vmState": "string"},
-                },
-                "commit": {
-                    "method": "POST",
-                    "path": "/api/v1/vms/<name>/commit",
-                    "description": "Commit VM disk changes to backing base image. VM must be stopped and destroyed.",
-                    "body": {
-                        "disk": "int|string (optional, default 0) — disk index or disk definition filename",
-                    },
-                    "response": {"vmName": "string", "imageName": "string", "diskPath": "string"},
-                },
-                "inventory-list": {
-                    "method": "GET",
-                    "path": "/api/v1/vms/<name>/inventory",
-                    "description": "List inventory file names for a VM",
-                    "response": {"name": "string", "files": "[string]"},
-                },
-                "inventory-get": {
-                    "method": "GET",
-                    "path": "/api/v1/vms/<name>/inventory/<filename>",
-                    "description": "Get a specific inventory file with content and timestamp",
-                    "response": {"name": "string", "file": "string", "content": "{...}", "timestamp": "ISO8601"},
-                },
-                "inventory-post": {
-                    "method": "POST",
-                    "path": "/api/v1/vms/<name>/inventory",
-                    "description": "Post data to VM inventory. If body.name is set, stores as {name}.json (overwrite); otherwise {timestamp}.json.",
-                    "body": {
-                        "name": "string (optional) — filename without .json extension",
-                        "...": "any JSON data",
-                    },
-                    "response": {"name": "string", "file": "string"},
-                },
+                "GET /api/v1/vms": "List all VMs (managed + virsh-only)",
+                "POST /api/v1/vms": "Create or update a VM. Body: id*, cpu*, ramInGB*, vmHostName*, osImage*, osVariant*, bridge*; optional: ipv4, gateway4, diskSizeGB, authType, customerPWD, customerKeys, shareInventoryData, prepareDomainImage",
+                "GET /api/v1/vms/<name>": "Get VM details (virsh state, disk/net JSONs, inventory with timestamps). Unmanaged VMs return minimal info.",
+                "DELETE /api/v1/vms/<name>": "Delete VM (managed: destroy+remove dir; unmanaged: virsh destroy+undefine)",
+                "POST /api/v1/vms/<name>/start": "Start VM (set vmState=running)",
+                "POST /api/v1/vms/<name>/stop": "Stop VM (set vmState=stopped)",
+                "PATCH /api/v1/vms": "Patch VM state. Body: id*, vmState* (running|stopped)",
+                "POST /api/v1/vms/<name>/commit": "Commit qcow2 disk changes to backing image. Body: disk (int|string, optional). VM must be stopped+destroyed.",
+                "GET /api/v1/vms/<name>/inventory": "List inventory file names",
+                "GET /api/v1/vms/<name>/inventory/<f>": "Get inventory file with content and timestamp",
+                "POST /api/v1/vms/<name>/inventory": "Post to inventory. Body.name → {name}.json (overwrite); no name → {timestamp}.json",
             },
         },
         "images": {
             "description": "Disk image management",
             "endpoints": {
-                "list": {
-                    "method": "GET", "path": "/api/v1/images",
-                    "description": "List all images (managed + disk-only)",
-                },
-                "get": {
-                    "method": "GET", "path": "/api/v1/images/<name>",
-                    "description": "Get image details including downloadState",
-                },
-                "create": {
-                    "method": "POST", "path": "/api/v1/images/<name>",
-                    "description": "Create/download an image (async, poll downloadState)",
-                },
-                "delete": {
-                    "method": "DELETE", "path": "/api/v1/images/<name>",
-                    "description": "Delete image (JSON definition + disk file)",
-                },
+                "GET /api/v1/images": "List all images",
+                "POST /api/v1/images/<name>": "Create/download image (async)",
+                "GET /api/v1/images/<name>": "Get image details (downloadState)",
+                "DELETE /api/v1/images/<name>": "Delete image and disk file",
             },
         },
         "bridges": {
             "description": "Network bridge management",
             "endpoints": {
-                "list": {
-                    "method": "GET", "path": "/api/v1/bridges",
-                    "description": "List all bridges",
-                },
-                "get": {
-                    "method": "GET", "path": "/api/v1/bridges/<name>",
-                    "description": "Get bridge details",
-                },
-                "create": {
-                    "method": "POST", "path": "/api/v1/bridges/<name>",
-                    "description": "Create/update bridge definition",
-                },
-                "delete": {
-                    "method": "DELETE", "path": "/api/v1/bridges/<name>",
-                    "description": "Delete bridge definition",
-                },
+                "GET /api/v1/bridges": "List bridges",
+                "POST /api/v1/bridges/<name>": "Create/update bridge",
+                "GET /api/v1/bridges/<name>": "Get bridge details",
+                "DELETE /api/v1/bridges/<name>": "Delete bridge",
             },
         },
         "utils": {
-            "description": "Utility endpoints",
             "endpoints": {
-                "health": {
-                    "method": "GET", "path": "/api/v1/utils/health",
-                    "description": "Health check",
-                },
-                "mac": {
-                    "method": "GET", "path": "/api/v1/utils/mac",
-                    "description": "Generate a random MAC address",
-                },
+                "GET /api/v1/utils/health": "Health check",
+                "GET /api/v1/utils/mac": "Generate random MAC address",
             },
-        },
-        "wireguard": {
-            "description": "WireGuard domain tool endpoints (planned)",
-            "endpoints": {},
         },
     },
     "common": {
-        "successResponse": {"success": "true", "data": "{...}"},
-        "errorResponse": {"success": "false", "error": {"code": "ERROR_CODE", "message": "..."}},
-        "errorCodes": [
-            "BAD_REQUEST (400) — invalid input",
-            "NOT_FOUND (404) — resource not found",
-            "VALIDATION_ERROR (400) — field validation failed",
-            "SYSTEM_COMMAND_FAILED (500) — host command failed",
-            "INTERNAL_ERROR (500) — unexpected error",
-        ],
+        "success": {"success": True, "data": "{...}"},
+        "error": {"success": False, "error": {"code": "ERROR_CODE", "message": "..."}},
+        "errorCodes": {
+            "BAD_REQUEST": "400 — invalid input",
+            "VALIDATION_ERROR": "400 — field validation failed",
+            "NOT_FOUND": "404 — resource not found",
+            "SYSTEM_COMMAND_FAILED": "500 — host command failed",
+            "INTERNAL_ERROR": "500 — unexpected error",
+        },
     },
 }
 
 
-@schema_bp.route("", methods=["GET"])
+@schema_bp.route("")
+@schema_bp.route("/")
 def schema_index():
-    return jsonify({
-        "success": True,
-        "data": SCHEMA,
-    })
+    return jsonify({"success": True, "data": _API_SCHEMA})

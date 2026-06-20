@@ -31,8 +31,10 @@ def load_config(config_path: str = None) -> dict:
     config_dir = os.path.dirname(os.path.abspath(config_path))
     for key in _DIR_KEYS:
         value = config.get(key, None)
-        if value is not None and not os.path.isabs(value):
-            config[key] = os.path.abspath(os.path.join(config_dir, value))
+        if value is not None:
+            if not os.path.isabs(value):
+                value = os.path.join(config_dir, value)
+            config[key] = os.path.normpath(value)
 
     return config
 
@@ -97,17 +99,11 @@ def create_app(config: dict = None) -> Flask:
 
     @app.route("/")
     def root():
-        endpoints = {}
-        for rule in app.url_map.iter_rules():
-            if rule.endpoint == "root":
-                continue
-            methods = sorted([m for m in rule.methods if m not in ("HEAD", "OPTIONS")])
-            endpoints[rule.endpoint] = f"{'|'.join(methods)} {rule.rule}"
         return jsonify({
             "success": True,
             "data": {
                 "service": "UniTao KVM Host",
-                "endpoints": endpoints
+                "docs": "/api/v1"
             }
         })
 
