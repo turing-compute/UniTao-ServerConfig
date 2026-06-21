@@ -130,6 +130,12 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "osType": "linux",
         "osVariant": os_variant,
     }
+    if auth_type:
+        vm_json["authType"] = auth_type
+    if customer_pwd:
+        vm_json["customerPWD"] = customer_pwd
+    if customer_keys:
+        vm_json["customerKeys"] = customer_keys
     return vm_json
 
 
@@ -715,8 +721,8 @@ def commit_vm_image(name: str):
             "error": {"code": "VALIDATION_ERROR", "message": "Disk missing 'imagePath'"}
         }), 400
 
-    image_data_dir = get_data_dir(current_app, "image")
-    disk_image_abs = os.path.normpath(os.path.join(image_data_dir, disk_image_rel))
+    # Resolve disk image path relative to the disk JSON's own directory.
+    disk_image_abs = os.path.normpath(os.path.join(os.path.dirname(disk_json_path), disk_image_rel))
 
     if not os.path.isfile(disk_image_abs):
         return jsonify({
@@ -746,11 +752,7 @@ def commit_vm_image(name: str):
 
     # 5. Resolve backing image name from the filesystem.
     backing_abs = os.path.normpath(backing_path)
-    try:
-        backing_rel = os.path.relpath(backing_abs, image_data_dir)
-    except ValueError:
-        backing_rel = backing_abs
-    image_name = os.path.splitext(os.path.basename(backing_rel))[0]
+    image_name = os.path.splitext(os.path.basename(backing_abs))[0]
 
     # Look up managed image.
     image_data = read_entity_data(current_app, "image", image_name)

@@ -91,9 +91,9 @@ class KvmVm:
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
         self.KeyDir = key_dir
-        self._auth_type = auth_type
-        self._customer_pwd = customer_pwd
-        self._customer_keys = customer_keys
+        self._auth_type = auth_type or self.VmData.get("authType", None)
+        self._customer_pwd = customer_pwd or self.VmData.get("customerPWD", None)
+        self._customer_keys = customer_keys or self.VmData.get("customerKeys", None)
         # Fall back to VmData for inventory settings (persisted from previous run).
         self._share_inventory_data = share_inventory_data or self.VmData.get("shareInventoryData", False)
         self._host_api_url = host_api_url or self.VmData.get("hostApiUrl", None)
@@ -715,6 +715,10 @@ class KvmNetwork:
                     f"        - 8.8.4.4"
                 ])
                 network_config.extend(route_config)
+        # Disable IPv6 DHCP and link-local to prevent systemd-networkd
+        # from entering a failed state when no DHCPv6 server is available.
+        network_config.append("    dhcp6: false")
+        network_config.append("    link-local: []")
         return network_config
 
 
