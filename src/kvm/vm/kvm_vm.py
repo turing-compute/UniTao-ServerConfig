@@ -265,26 +265,39 @@ class KvmVm:
                ""
             ])
         # Determine authentication type.
-        # Default (no authType): host key if available, else random password.
+        # Host key is always injected when available for SSH access.
+        # authType controls additional authentication (password, etc).
         auth_type = self._auth_type
         km = self._get_key_manager()
+
+        # Always inject host key for SSH if available.
+        if km is not None:
+            host_pubkey = km.get_public_key_openssh()
+            user_data.extend([
+                "# Inject Host public key for key-based SSH access",
+                "ssh_authorized_keys:",
+                f"  - {host_pubkey}",
+                ""
+            ])
+            self.log.info("Host SSH public key injected into cloud-init user-data")
 
         if auth_type == self.Keyword.AuthTypes.CustomerPWD:
             self._apply_customer_pwd(user_data)
         elif auth_type == self.Keyword.AuthTypes.RandomPWD:
             self._apply_random_pwd(user_data)
         elif auth_type == self.Keyword.AuthTypes.HostKey:
-            self._apply_host_key(user_data, km)
+            self._apply_host_key(user_data, km)  # ssh_pwauth: false
         elif auth_type == self.Keyword.AuthTypes.CustomerKey:
             self._apply_customer_keys(user_data)
         elif auth_type == self.Keyword.AuthTypes.NoAuth:
             self._apply_no_auth(user_data)
         else:
-            # Default: host key if available, else random password.
-            if km is not None:
-                self._apply_host_key(user_data, km)
-            else:
-                self._apply_random_pwd(user_data)
+            # Default: disable password auth (host key only).
+            user_data.extend([
+                "# Disable password authentication",
+                "ssh_pwauth: false",
+                ""
+            ])
 
         # Collect write_files and runcmd entries for cloud-init.
         write_files = []
@@ -337,21 +350,14 @@ class KvmVm:
         self.log.info("Random password generated and injected into cloud-init user-data")
 
     def _apply_host_key(self, user_data: list, km):
-        if km is not None:
-            host_pubkey = km.get_public_key_openssh()
-            user_data.extend([
-                "# Inject Host public key for key-based SSH access",
-                "ssh_authorized_keys:",
-                f"  - {host_pubkey}",
-                "# Disable password authentication",
-                "ssh_pwauth: false",
-                ""
-            ])
-            self.VmData[self.Keyword.Login] = "host_key"
-            self.log.info("Host SSH public key injected into cloud-init user-data")
-        else:
-            self.log.warning("HostKey authType requested but host key not available, falling back to random password")
-            self._apply_random_pwd(user_data)
+        # Host key already injected above; just ensure password auth is disabled.
+        user_data.extend([
+            "# Disable password authentication",
+            "ssh_pwauth: false",
+            ""
+        ])
+        self.VmData[self.Keyword.Login] = "host_key"
+        self.log.info("HostKey: password authentication disabled")
 
     def _apply_customer_keys(self, user_data: list):
         keys = self._customer_keys or []
@@ -399,9 +405,23 @@ class KvmVm:
             tool_b64 = base64.b64encode(f.read()).decode()
         with open(report_src, "rb") as f:
             report_b64 = base64.b64encode(f.read()).decode()
+        report_network_service_lines = [
+            "[Unit]",
+            "Description=Report VM network config to host inventory",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "ExecStart=/usr/bin/python3 /opt/unitao-server-config/report_network.py",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+        ]
         run_commands.extend([
             "  - mkdir -p /opt/unitao-server-config",
-            "  - python3 /opt/unitao-server-config/report_network.py",
+            "  - systemctl enable report-network.service",
+            "  - systemctl start report-network.service",
         ])
         write_files.extend([
             "  - path: /opt/unitao-server-config/inventory.json",
@@ -415,6 +435,9 @@ class KvmVm:
             "    permissions: '0755'",
             "    encoding: b64",
             f"    content: {report_b64}",
+            "  - path: /etc/systemd/system/report-network.service",
+            "    permissions: '0644'",
+            f"    content: {json.dumps('\n'.join(report_network_service_lines) + '\n')}",
         ])
         # Persist inventory settings so subsequent calls (PATCH/start/stop) can restore them.
         self.VmData["shareInventoryData"] = True

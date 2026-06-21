@@ -13,8 +13,8 @@ Cleans:
     - Inventory config (inventory.json)
     - wg_agent network config
     - SSH host keys (regenerated on next boot by cloud-init / sshd)
-    - Machine ID (regenerated on next boot by systemd)
-    - Cloud-init state (re-runs on next boot)
+    - Machine ID (reset to 'uninitialized', regenerated on next boot)
+    - Cloud-init state (re-runs on next boot, apt module disabled)
     - Network config files injected by cloud-init
     - Shell history
 """
@@ -61,9 +61,17 @@ def remove_path(path: str, dry_run: bool = False):
 def clean_inventory(dry_run: bool = False):
     """Remove inventory config injected by cloud-init."""
     remove_path(INVENTORY_CONFIG, dry_run)
-    # Also remove inventory_tool.py if present.
+    # Also remove inventory_tool.py and report_network.py if present.
     inv_tool = os.path.join(os.path.dirname(INVENTORY_CONFIG), "inventory_tool.py")
     remove_path(inv_tool, dry_run)
+    report_script = os.path.join(os.path.dirname(INVENTORY_CONFIG), "report_network.py")
+    remove_path(report_script, dry_run)
+    # Remove report-network systemd service.
+    remove_path("/etc/systemd/system/report-network.service", dry_run)
+    if not dry_run:
+        subprocess.run(["systemctl", "disable", "report-network.service"],
+                       check=False, capture_output=True)
+        print("  disabled report-network.service")
 
 
 def clean_ssh_host_keys(dry_run: bool = False):
@@ -74,9 +82,44 @@ def clean_ssh_host_keys(dry_run: bool = False):
 
 
 def clean_machine_id(dry_run: bool = False):
-    """Remove machine-id. systemd regenerates on next boot."""
-    remove_path(MACHINE_ID, dry_run)
+    """Reset machine-id so systemd regenerates on next boot.
+
+    Writes "uninitialized" instead of deleting, so systemd-networkd's
+    DHCP client can still derive IAID+DUID (LP #1999680).
+    """
+    if dry_run:
+        print("  [dry-run] would write 'uninitialized' to /etc/machine-id")
+        return
+    try:
+        with open(MACHINE_ID, "w") as f:
+            f.write("uninitialized\n")
+        print("  reset machine-id (uninitialized)")
+    except Exception as e:
+        print(f"  WARNING: failed to reset {MACHINE_ID}: {e}", file=sys.stderr)
     remove_path(DBUS_MACHINE_ID, dry_run)
+
+
+def clean_wait_online(dry_run: bool = False):
+    """Mask systemd-networkd-wait-online.service to avoid 120s boot delay."""
+    if dry_run:
+        print("  [dry-run] would mask systemd-networkd-wait-online.service")
+        return
+    subprocess.run(["systemctl", "mask", "systemd-networkd-wait-online.service"],
+                   check=False, capture_output=True)
+    print("  masked systemd-networkd-wait-online.service")
+
+
+def disable_cloud_init_apt(dry_run: bool = False):
+    """Prevent cloud-init from overwriting apt sources on first boot."""
+    cfg_dir = "/etc/cloud/cloud.cfg.d"
+    cfg_file = os.path.join(cfg_dir, "99-preserve-sources.cfg")
+    if dry_run:
+        print(f"  [dry-run] would write {cfg_file}")
+        return
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(cfg_file, "w") as f:
+        f.write("apt:\n  preserve_sources_list: true\n")
+    print("  disabled cloud-init apt module")
 
 
 def clean_cloud_init(dry_run: bool = False):
@@ -140,10 +183,16 @@ def main():
     print(f"\n[3/5] Machine ID:")
     clean_machine_id(dry_run)
 
-    print(f"\n[4/5] Cloud-init state:")
+    print(f"\n[4/7] Cloud-init state:")
     clean_cloud_init(dry_run)
 
-    print(f"\n[5/5] Network config + misc (shell history, journal):")
+    print(f"\n[5/7] Mask wait-online:")
+    clean_wait_online(dry_run)
+
+    print(f"\n[6/7] Disable cloud-init apt:")
+    disable_cloud_init_apt(dry_run)
+
+    print(f"\n[7/7] Network config + misc (shell history, journal):")
     clean_network_config(dry_run)
     clean_misc(dry_run)
 
