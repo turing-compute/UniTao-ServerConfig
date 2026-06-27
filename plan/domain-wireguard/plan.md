@@ -47,12 +47,12 @@ UniTao-ServerConfig 创建的 VM 之间可能需要组建 VPN 网络。WireGuard
 |------|------|------|
 | 1 | `[x]` | `src/rest/api_vm.py` — inventory API：按 name 存储 + 返回文件修改时间戳 |
 | 2 | `[x]` | `src/rest/api_vm.py` — VM commit API + `src/kvm/image/prep_image_for_commit.py` + `src/domain/wireguard/prep_image_for_commit.py` — commit 前清理 |
-| 3.1 | `[ ]` | `src/domain/wireguard/wg_data.py` — 纯数据模型：IP 工具函数、WgNetworkConfig、WgPeerData |
-| 3.2 | `[ ]` | `src/domain/wireguard/wg_config_file.py` — WgConfigFile：wireguard_config.json |
-| 3.3 | `[ ]` | `src/domain/wireguard/wg_key_manager.py` — WgKeyManager：VM 侧密钥对管理 |
-| 3.4 | `[ ]` | `src/domain/wireguard/wg_config_builder.py` — WgConfigBuilder：wg.conf 配置文本构建 |
-| 4 | `[ ]` | `src/domain/wireguard/wg_agent.py` — VM 侧 Agent |
-| 5 | `[ ]` | `src/domain/wireguard/wg_agent_service.py` — Agent 的 systemd 化管理 |
+| 3.1 | `[x]` | `src/domain/wireguard/wg_data.py` — 纯数据模型：IP 工具函数、WgNetworkConfig、WgPeerData |
+| 3.2 | `[x]` | `src/domain/wireguard/wg_config_file.py` — WgConfigFile：wireguard_config.json（`public_keys` + `network`，peers 数组，snake_case） |
+| 3.3 | `[x]` | `src/domain/wireguard/wg_key_manager.py` — WgKeyManager：VM 侧密钥对管理 |
+| 3.4 | `[x]` | `src/domain/wireguard/wg_config_builder.py` — WgConfigBuilder：wg.conf 配置文本构建 |
+| 4 | `[x]` | `src/domain/wireguard/wg_agent.py` — VM 侧 Agent（所有 peer 对等，Orchestrator 直接分配 IP） |
+| 5 | `[x]` | `src/domain/wireguard/wg_agent_service.py` — Agent 的 systemd 化管理 |
 
 > **图例**: `[ ]` 待开始 `[~]` 进行中 `[x]` 已完成 `[-]` 已取消
 
@@ -265,33 +265,31 @@ class WgNetworkConfig:
 
 **职责**: 定义 `wireguard_config.json` 的完整格式，VM Agent 和 Orchestrator 通过此结构协作。依赖 `wg_data.py`（WgPeerData）。
 
-**文件**: `wg_config_file.py`（~55 行）
+**设计决策（简化）**: WireGuard 所有 peer 对等，无 server/client 之分。Orchestrator 掌握全局拓扑，直接分配所有 IP。endpoint 只出现在 peers 中（VM 不需要知道自己的 endpoint）。
+
+**文件**: `wg_config_file.py`（~150 行）
 
 #### WgConfigFile — `wireguard_config.json` 数据结构
 
-VM 和 Orchestrator 通过同一个文件协作。VM 写入 `self` 段，Orchestrator 回填 `peers` 和 `self.assignedIP`。
+VM 写入 `self.publicKey`，Orchestrator 回填其余所有字段。
 
 **JSON 格式** (`wireguard_config.json`):
 
 ```json
 {
-  "name": "wireguard_config",
-  "data": {
-    "timestamp": "2026-06-18T10:00:00Z",
-    "self": {
-      "publicKey": "qH3q5X...base64...",
-      "id": "vm-mail01",
-      "role": "server",
-      "endpoint": "192.168.122.10:51820",
-      "assignedSubnet": "10.200.0.0/24",
-      "assignedIP": "10.200.0.1/24"
-    },
+  "public_keys": {
+    "primary": "qH3q5X...base64..."
+  },
+  "network": {
+    "assigned_id": "10.200.0.1",
+    "listen_port": 51820,
+    "dns_servers": ["8.8.8.8"],
     "peers": [
       {
-        "publicKey": "abc...",
+        "public_key": "abc...",
         "endpoint": "192.168.122.11:51820",
-        "assignedIP": "10.200.0.11/32",
-        "allowedIPs": ["10.200.0.11/32"]
+        "assigned_id": "10.200.0.11",
+        "allowed_ips": ["10.200.0.11/32"]
       }
     ]
   }
@@ -300,110 +298,74 @@ VM 和 Orchestrator 通过同一个文件协作。VM 写入 `self` 段，Orchest
 
 | 段 | 写入方 | 说明 |
 |------|------|------|
-| `data.timestamp` | 每次更新方 | ISO 8601 UTC 时间戳，每次 POST 时更新 |
-| `data.self.publicKey` | VM Agent | VM 的 WireGuard 公钥 |
-| `data.self.id` | Orchestrator | VM 在 WireGuard 网络中的标识 |
-| `data.self.role` | Orchestrator | `"server"` 或 `"client"` |
-| `data.self.endpoint` | Orchestrator | VM 的可达地址 `ip:port` |
-| `data.self.assignedSubnet` | Orchestrator | 仅 server: Orchestrator 分配的子网 CIDR |
-| `data.self.assignedIP` | Server / Orchestrator | Server 自取 `.1` 写回；Client 由 Orchestrator 回填 |
-| `data.peers[*].publicKey` | Orchestrator | Peer 的公钥 |
-| `data.peers[*].endpoint` | Orchestrator | Peer 的可达地址 |
-| `data.peers[*].assignedIP` | Server / Orchestrator | Server 分配；Client 由 Orchestrator 回填 |
+| `public_keys.primary` | VM Agent | VM 的 WireGuard 公钥 |
+| `network.assigned_id` | Orchestrator | VM 在 VPN 中的 IP，Orchestrator 直接分配 |
+| `network.listen_port` | VM Agent | VM 的 WireGuard 监听端口 |
+| `network.dns_servers` | VM Agent/Orchestrator | DNS 服务器列表 |
+| `network.peers[*].public_key` | Orchestrator | Peer 的公钥 |
+| `network.peers[*].endpoint` | Orchestrator | Peer 的可达地址 `ip:port` |
+| `network.peers[*].assigned_id` | Orchestrator | Peer 在 VPN 中的 IP |
+| `network.peers[*].allowed_ips` | Orchestrator | 通过该 Peer 可到达的 IP 范围 |
 
-**交互序列**:
-1. 所有 VM 写入: `data.self.publicKey`, `data.peers: []`, `data.timestamp` 更新
-2. Orchestrator PATCH 回填: `data.self.id`, `data.self.role`, `data.self.endpoint`, `data.peers: [{publicKey, endpoint}, ...]`, `data.timestamp` 更新
-   - 若 `role == "server"`: 额外写入 `data.self.assignedSubnet: "10.200.0.0/24"`
-3. Server: 轮询发现 `role=="server"` 且 `assignedSubnet` 非空 → 自取 `10.200.0.1/24` 写入 `data.self.assignedIP`
-   → 为每个 Peer 分配 IP → 写入 `data.peers[*].assignedIP`, `data.timestamp` 更新
-4. Orchestrator 从 Server inventory 读取 IP 分配 → 回填 Client 的 `data.self.assignedIP` + `data.peers[*].assignedIP`, `data.timestamp` 更新
-5. Client 轮询发现 IP 齐备 → 生成配置激活接口
-6. Agent 通过 `data.timestamp` 判断变更，通过 `data.self.role` 确定行为
+**交互序列**（2 步）:
+1. 所有 VM 发布: `public_keys.primary` + `network.listen_port` + `network.peers: []`
+2. Orchestrator 一次性回填: `network.assigned_id` + `network.peers[{public_key, endpoint, assigned_id, allowed_ips}]`
+3. VM Agent 轮询发现 `self.assignedIP` 非空 → 生成配置 → 激活
 
 **类设计**:
 
 ```python
 class WgConfigFile:
-    """wireguard_config.json 的数据结构。
-
-    Inventory 存储格式:
-        {"name": "wireguard_config", "data": {"self": {...}, "peers": [...]}}
-    """
+    """wireguard_config.json 的数据结构。"""
 
     INVENTORY_NAME = "wireguard_config"
 
     class Key:
-        NAME = "name"
-        DATA = "data"
+        PUBLIC_KEYS = "public_keys"
+        NETWORK     = "network"
 
-    class DataKey:
-        TIMESTAMP = "timestamp"
-        SELF      = "self"
-        PEERS     = "peers"
+    class PublicKeysKey:
+        PRIMARY = "primary"
 
-    class SelfKey:
-        PUBLIC_KEY      = "publicKey"
-        ID              = "id"
-        ROLE            = "role"
-        ENDPOINT        = "endpoint"
-        ASSIGNED_SUBNET = "assignedSubnet"
-        ASSIGNED_IP     = "assignedIP"
+    class NetworkKey:
+        ASSIGNED_ID  = "assigned_id"
+        LISTEN_PORT  = "listen_port"
+        DNS_SERVERS  = "dns_servers"
+        PEERS        = "peers"
 
-    ROLE_SERVER = "server"
-    ROLE_CLIENT = "client"
-
-    def __init__(self, inventory_dict: dict):
-        """解析 inventory 文件内容。inventory_dict 含 name + data 顶层字段。
-        self._data = inventory_dict["data"]
-        """
-
+    def __init__(self, data: dict): ...
     def validate(self):
         """校验:
-        - name: 必须 == "wireguard_config"
-        - data: dict, 含 timestamp + self + peers
-        - data.timestamp: 必填, ISO 8601 格式字符串
-        - data.self.publicKey: 必填, 非空 str
-        - data.self.id: 若存在, 非空 str (Orchestrator PATCH 填入)
-        - data.self.role: 若存在, "server" 或 "client" (Orchestrator PATCH 填入)
-        - data.self.endpoint: 若存在且非空, host:port 格式 (Orchestrator PATCH 填入)
-        - data.self.assignedSubnet: 若存在且非空, 合法 CIDR (仅 role=="server")
-        - data.self.assignedIP: 若存在且非空, 合法 CIDR
-        - data.peers: list, 每项为合法 WgPeerData
+        - public_keys.primary: 必填, 非空 str
+        - network.assigned_id: 若存在, 非空 str
+        - network.listen_port: 若存在, int 1-65535
+        - network.dns_servers: 若存在, list[str]
+        - network.peers: list, 每项含 public_key
         """
 
-    @property
-    def timestamp(self) -> str: ...
     @property
     def self_public_key(self) -> str: ...
     @property
-    def self_id(self) -> str | None: ...
+    def assigned_id(self) -> str | None: ...
     @property
-    def self_role(self) -> str | None: ...
+    def listen_port(self) -> int | None: ...
     @property
-    def self_endpoint(self) -> str | None: ...
+    def dns_servers(self) -> list: ...
     @property
-    def self_assigned_subnet(self) -> str | None: ...
+    def peers(self) -> list: ...
     @property
-    def self_assigned_ip(self) -> str | None: ...
-    @property
-    def peers(self) -> list[WgPeerData]: ...
+    def has_config(self) -> bool:
+        """assigned_id 非空即可生成配置。"""
 
-    @property
-    def is_server(self) -> bool:
-        """self.role == "server" """
-
-    def to_dict(self) -> dict:
-        """导出为 inventory 格式，自动更新 timestamp 为当前 UTC 时间。
-        {"name":"wireguard_config","data":{"timestamp":"...","self":{...},"peers":[...]}}
-        """
+    def to_dict(self) -> dict: ...
 
     @staticmethod
     def from_file(path: str) -> "WgConfigFile": ...
 
     @staticmethod
-    def create_initial(public_key: str) -> "WgConfigFile":
-        """VM 首次发布: {"name":"wireguard_config","data":{"timestamp":"...","self":{"publicKey":"..."},"peers":[]}}"""
+    def create_initial(public_key: str, listen_port: int = None,
+                       dns_servers: list = None) -> "WgConfigFile":
+        """VM 首次发布: public_keys + network (listen_port, dns_servers, peers=[])"""
 ```
 
 ---
@@ -450,19 +412,19 @@ class WgKeyManager:
 
 ```json
 {
-  "publicKey": "qH3q5X...base64...",
+  "public_key": "qH3q5X...base64...",
   "endpoint": "192.168.122.11:51820",
-  "assignedIP": "10.200.0.11/32",
-  "allowedIPs": ["10.200.0.11/32"]
+  "assigned_id": "10.200.0.11/32",
+  "allowed_ips": ["10.200.0.11/32"]
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `publicKey` | Peer 的 WireGuard 公钥 (44 字符 base64) |
+| `public_key` | Peer 的 WireGuard 公钥 (44 字符 base64) |
 | `endpoint` | Peer 的可达地址 `ip:port` |
-| `assignedIP` | Peer 在 VPN 子网中的 IP (CIDR /32) |
-| `allowedIPs` | 通过该 Peer 可到达的 IP 范围 |
+| `assigned_id` | Peer 在 VPN 子网中的 IP (CIDR /32) |
+| `allowed_ips` | 通过该 Peer 可到达的 IP 范围 |
 
 **类设计**:
 
@@ -471,18 +433,18 @@ class WgPeerData:
     """WireGuard Peer 配置数据校验和承载。"""
 
     class Key:
-        PUBLIC_KEY   = "publicKey"
+        PUBLIC_KEY   = "public_key"
         ENDPOINT     = "endpoint"
-        ASSIGNED_IP  = "assignedIP"
-        ALLOWED_IPS  = "allowedIPs"
+        ASSIGNED_ID  = "assigned_id"
+        ALLOWED_IPS  = "allowed_ips"
 
     def __init__(self, data: dict): ...
     def validate(self):
         """逐字段校验:
-        - publicKey:    非空 str, 长度 44, base64 字符集 (A-Za-z0-9+/)
+        - public_key:   非空 str, 长度 44, base64 字符集 (A-Za-z0-9+/)
         - endpoint:     host:port 格式, port 1-65535
-        - assignedIP:   合法 CIDR
-        - allowedIPs:   list[str], 每项合法 CIDR, 非空
+        - assigned_id:  合法 CIDR
+        - allowed_ips:  list[str], 每项合法 CIDR, 非空
         """
 
     @property
@@ -490,7 +452,7 @@ class WgPeerData:
     @property
     def endpoint(self) -> str: ...             # "192.168.122.11:51820"
     @property
-    def assigned_ip(self) -> str: ...          # "10.200.0.11/32"
+    def assigned_id(self) -> str: ...          # "10.200.0.11/32"
     @property
     def assigned_ip_address(self) -> str: ...  # "10.200.0.11"
     @property
@@ -637,11 +599,9 @@ src/domain/wireguard/
 
 ### 步骤 4: `src/domain/wireguard/wg_agent.py`
 
-VM 侧 WireGuard Agent。预装在 VM image 中。Agent 根据 Orchestrator 分配的角色执行不同逻辑：**Server**（有 `assignedSubnet`）负责 IP 分配，**Client** 等待 Orchestrator 回填。
+VM 侧 WireGuard Agent。预装在 VM image 中。所有 peer 对等，Orchestrator 直接分配所有 IP，Agent 无需区分角色。
 
 #### 4.1 Agent 工作流程
-
-Agent 根据 Orchestrator 分配的角色执行不同逻辑。
 
 ```
 [1] 读取网络配置文件 → WgNetworkConfig
@@ -653,40 +613,19 @@ Agent 根据 Orchestrator 分配的角色执行不同逻辑。
 
 [3] 读取 inventory.json → hostApiUrl, vmId
 
-[4] 第一轮 — 用刚生成的公钥创建并发布 wireguard_config.json:
-    WgConfigFile.create_initial(public_key)
-    → POST /api/v1/vms/{vmId}/inventory
-    {"name":"wireguard_config","data":{"self":{"publicKey":"qH3..."},"peers":[]}}
+[4] 用公钥创建并发布 wireguard_config.json:
+    WgConfigFile.create_initial(public_key, listen_port, dns_servers)
+    → inventory_tool.py --data /tmp/xxx.json
+    {"public_keys":{"primary":"qH3..."},"network":{"listen_port":51820,"peers":[]}}
     ※ 密钥先生成，再填入文件并发布，保证 image 中不残留密钥
 
-[5] 第二轮 — 轮询等待 Orchestrator PATCH:
-    定期 GET .../inventory/wireguard_config.json
-    → 检查 self.role 是否非空 (Orchestrator 已 PATCH)
-    → role=="server" → Server 路径; role=="client" → Client 路径
+[5] 轮询等待 Orchestrator 回填:
+    定期 inventory_tool.py --get wireguard_config.json
+    → 检查 WgConfigFile.has_config (network.assigned_id 非空)
+    → 检查 peers[*].assigned_id 是否全部非空
+    → IP 齐备后: WgConfigBuilder.build_vm_config(...) → wg-quick up <network>
 
-[6] 分支:
-
-    ┌─ Server 路径 ──────────────────────────────────────┐
-    │ a. 自取 IP: self.assignedSubnet = "10.200.0.0/24"  │
-    │    → 分配 self.assignedIP = "10.200.0.1/24"        │
-    │ b. 为每个 Peer 分配 IP:                             │
-    │    → peers[0].assignedIP = "10.200.0.2/32"         │
-    │    → peers[1].assignedIP = "10.200.0.3/32"         │
-    │ c. POST 写回 inventory (更新 timestamp)             │
-    │ d. 生成配置: WgConfigBuilder.build_vm_config(...)   │
-    │    → wg-quick up wg-mesh                           │
-    └────────────────────────────────────────────────────┘
-
-    ┌─ Client 路径 ──────────────────────────────────────┐
-    │ a. 继续轮询, 等待 Orchestrator 回填:                │
-    │    → peers[*].assignedIP 是否全部非空?              │
-    │    → self.assignedIP 是否非空?                      │
-    │ b. IP 齐备后:                                       │
-    │    WgConfigBuilder.build_vm_config(...)             │
-    │    → wg-quick up wg-mesh                           │
-    └────────────────────────────────────────────────────┘
-
-[7] 继续轮询, Peer 变更时 wg syncconf 增量更新
+[6] 继续轮询, Peer 变更时 wg syncconf 增量更新
 ```
 
 #### 4.2 Agent 命令行
@@ -710,7 +649,7 @@ python3 /opt/unitao/wg_agent.py --network wg-mesh --once
 
 #### 4.3 Agent 特性
 
-- **双角色**: Server 角色 (有 `assignedSubnet`) 自取 `.1` 并分配 Peer IP；Client 角色等待 Orchestrator 回填
+- **所有 peer 对等**: 无 server/client 之分，Orchestrator 直接分配所有 IP
 - **密钥安全**: 首次启动时生成密钥对，不预置在 image 中，避免克隆 VM 共享同一密钥
 - **轮询**: 定期（默认 30 秒）通过 `inventory_tool.py --get wireguard_config.json` 检查配置变更
 - **幂等**: 重复运行安全 — 检测已有配置，仅在 Peer 列表变更时更新
@@ -727,17 +666,17 @@ Agent 的 systemd 化管理和安装脚本。
 #### 5.1 systemd unit 文件
 
 ```ini
-# /etc/systemd/system/wg-agent@.service
+# /etc/systemd/system/wg-agent.service
 [Unit]
-Description=WireGuard Mesh Agent for %i
+Description=WireGuard Mesh Agent (wg-mesh)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/python3 /opt/unitao/wg_agent.py --network %i
-ExecStop=/usr/bin/wg-quick down %i
+ExecStart=/usr/bin/python3 /opt/unitao/wg_agent.py --network wg-mesh
+ExecStop=/usr/bin/wg-quick down wg-mesh
 StandardOutput=journal
 StandardError=journal
 
@@ -759,56 +698,35 @@ WantedBy=multi-user.target
 ```
 ┌─ 第一轮: 所有 VM 发布公钥 ────────────────────────────────────────────┐
 │                                                                         │
-│  vm-mail01: POST {"name":"wireguard_config",                          │
-│    "data":{"self":{"publicKey":"qH3..."},"peers":[]}}                 │
-│  vm-web01:  POST {"name":"wireguard_config",                          │
-│    "data":{"self":{"publicKey":"abc..."},"peers":[]}}                 │
+│  vm-mail01: POST {"public_keys":{"primary":"qH3..."},                 │
+│    "network":{"listen_port":51820,"peers":[]}}                        │
+│  vm-web01:  POST {"public_keys":{"primary":"abc..."},                 │
+│    "network":{"listen_port":51820,"peers":[]}}                        │
 │                                                                         │
 └────────────────────────────────────────────────────────────────────────┘
 
-┌─ 第二轮: Orchestrator 回填拓扑 (本工具范围外) ────────────────────────┐
+┌─ 第二轮: Orchestrator 一次性回填所有信息 ─────────────────────────────┐
 │                                                                         │
-│  ① 决定角色: vm-mail01 = server, vm-web01 = client                     │
-│  ② PATCH vm-mail01:                                                    │
-│      {"name":"wireguard_config",                                       │
-│       "data":{"self":{"publicKey":"qH3...",                            │
-│                "id":"vm-mail01","role":"server",                       │
+│  Orchestrator 读取各 VM 公钥, 决定拓扑, 直接分配所有 IP:               │
+│                                                                         │
+│  PATCH vm-mail01:                                                      │
+│     {"public_keys":{"primary":"qH3..."},                               │
+│      "network":{"assigned_id":"10.200.0.1",                            │
+│      "peers":[{"public_key":"abc...",                                  │
+│                "endpoint":"192.168.122.11:51820",                      │
+│                "assigned_id":"10.200.0.2",                             │
+│                "allowed_ips":["10.200.0.2/32"]}]}}                     │
+│                                                                         │
+│  PATCH vm-web01:                                                       │
+│     {"public_keys":{"primary":"abc..."},                               │
+│      "network":{"assigned_id":"10.200.0.2",                            │
+│      "peers":[{"public_key":"qH3...",                                  │
 │                "endpoint":"192.168.122.10:51820",                      │
-│                "assignedSubnet":"10.200.0.0/24"},                      │
-│       "peers":[{"publicKey":"abc...",                                  │
-│                  "endpoint":"192.168.122.11:51820"}]}}                 │
-│  ③ PATCH vm-web01:                                                    │
-│      {"name":"wireguard_config",                                       │
-│       "data":{"self":{"publicKey":"abc...",                            │
-│                "id":"vm-web01","role":"client",                        │
-│                "endpoint":"192.168.122.11:51820"},                     │
-│       "peers":[{"publicKey":"qH3...",                                  │
-│                  "endpoint":"192.168.122.10:51820"}]}}                 │
+│                "assigned_id":"10.200.0.1",                             │
+│                "allowed_ips":["10.200.0.1/32"]}]}}                     │
 │                                                                         │
-└────────────────────────────────────────────────────────────────────────┘
-
-┌─ 第三轮: WG Server 分配 IP ───────────────────────────────────────────┐
-│                                                                         │
-│  vm-mail01 (Server):                                                    │
-│    发现 assignedSubnet = "10.200.0.0/24"                                │
-│    → self.assignedIP = "10.200.0.1/24"                                 │
-│    → peers[0].assignedIP = "10.200.0.2/32"  (vm-web01)                 │
-│    → POST 写回 inventory                                                │
-│    → wg-quick up wg-mesh                                               │
-│                                                                         │
-│  vm-web01 (Client):                                                     │
-│    继续轮询, 等待 Orchestrator 回填 IP...                               │
-│                                                                         │
-└────────────────────────────────────────────────────────────────────────┘
-
-┌─ 第四轮: Orchestrator 回填 Client IP ─────────────────────────────────┐
-│                                                                         │
-│  读取 vm-mail01 inventory → peers[0].assignedIP = "10.200.0.2/32"     │
-│  → 回填 vm-web01:                                                      │
-│      self.assignedIP = "10.200.0.2/32"                                 │
-│      peers[0].assignedIP = "10.200.0.1/32"  (Server 的 IP)            │
-│                                                                         │
-│  vm-web01 轮询发现 IP 齐备 → wg-quick up wg-mesh                       │
+│  vm-mail01 轮询发现 assigned_id 非空 → wg-quick up wg-mesh            │
+│  vm-web01  轮询发现 assigned_id 非空 → wg-quick up wg-mesh            │
 │                                                                         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -845,9 +763,7 @@ WantedBy=multi-user.target
       │ wg_agent  │ │ wg_agent  │ │ wg_agent  │
       │ ① POST公钥│ │ ① POST公钥│ │ ① POST公钥│
       │ ② poll拓朴│ │ ② poll拓朴│ │ ② poll拓朴│
-      │ ③ self-IP │ │ ③ self-IP │ │ ③ self-IP │
-      │ ④ 发现peer│ │ ④ 发现peer│ │ ④ 发现peer│
-      │ ⑤ apply   │ │ ⑤ apply   │ │ ⑤ apply   │
+      │ ③ apply   │ │ ③ apply   │ │ ③ apply   │
       │           │ │           │ │           │
       │ wg-mesh   │ │ wg-mesh   │ │ wg-mesh   │
       │ .10/32    │ │ .11/32    │ │ .12/32    │
@@ -859,10 +775,10 @@ WantedBy=multi-user.target
 │ Orchestrator (本工具范围外)                                   │
 │                                                               │
 │  ① 读取各 VM 的 publicKey                                     │
-│  ② 决定 endpoint 和拓扑 (谁与谁 Peer)                         │
-│  ③ 回填 self.endpoint + peers (不填 IP)                       │
+│  ② 决定拓扑 (谁与谁 Peer) 和 IP 分配                          │
+│  ③ 一次性回填所有 self + peers (含 endpoint, assignedIP)      │
 │                                                               │
-│  ※ IP 由 WG Server 分配, Orchestrator 回填给 Client          │
+│  ※ IP 由 Orchestrator 直接分配，无 server/client 之分         │
 │                                                               │
 └──────────────────────────────────────────────────────────────┘
 ```
