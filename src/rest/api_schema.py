@@ -22,6 +22,7 @@ _API_SCHEMA = {
                 "GET /api/v1/vms/<name>/inventory": "List inventory file names",
                 "GET /api/v1/vms/<name>/inventory/<f>": "Get inventory file with content and timestamp",
                 "POST /api/v1/vms/<name>/inventory": "Post to inventory. Body.name → {name}.json (overwrite); no name → {timestamp}.json",
+                "PATCH /api/v1/vms/<name>/inventory/<file>": "Patch an inventory file (JSON deep-merge). Only updates specified fields.",
             },
         },
         "images": {

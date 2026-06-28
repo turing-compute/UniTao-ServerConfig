@@ -132,12 +132,10 @@ curl -s $HOST/api/v1/vms/wireguard-prep/inventory | python3 -m json.tool
 用 Orchestrator 回填测试一下完整流程：
 
 ```bash
-# Post backfill
-curl -s -X POST $HOST/api/v1/vms/wireguard-prep/inventory \
+# Post backfill (PATCH — only updates data.network, preserves public_keys)
+curl -s -X PATCH $HOST/api/v1/vms/wireguard-prep/inventory/wireguard_network.json \
   -H "Content-Type: application/json" -d '{
-  "name": "wireguard_network",
   "data": {
-    "public_keys": {"primary": "SHOULD_NOT_CHANGE"},
     "network": {
       "assigned_ip": "10.200.0.1/32",
       "listen_port": 51820,
@@ -242,11 +240,9 @@ ssh ubuntu@$IP "systemctl is-active wg-quick@wg0"
 ### 8. Orchestrator 回填
 
 ```bash
-curl -s -X POST $HOST/api/v1/vms/wireguard-test/inventory \
+curl -s -X PATCH $HOST/api/v1/vms/wireguard-test/inventory/wireguard_network.json \
   -H "Content-Type: application/json" -d '{
-  "name": "wireguard_network",
   "data": {
-    "public_keys": {"primary": "SHOULD_NOT_CHANGE"},
     "network": {
       "assigned_ip": "10.200.0.1/32",
       "listen_port": 51820,

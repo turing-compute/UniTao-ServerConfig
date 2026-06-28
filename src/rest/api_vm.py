@@ -528,6 +528,61 @@ def post_inventory(name: str):
     }), 201
 
 
+@vm_bp.route("/<name>/inventory/<filename>", methods=["PATCH"])
+def patch_inventory(name: str, filename: str):
+    """Patch an inventory file — JSON deep-merge the request body into the existing content."""
+    logger = _get_logger()
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+        }), 404
+
+    inv_file = os.path.join(vm_data_dir(current_app, name), "inventory", filename)
+    if not os.path.isfile(inv_file):
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"Inventory file '{filename}' not found"}
+        }), 404
+
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
+        }), 400
+
+    patch_data = request.get_json()
+    if patch_data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
+        }), 400
+
+    with open(inv_file, "r") as f:
+        existing = json.load(f)
+
+    _deep_merge(existing, patch_data)
+
+    with open(inv_file, "w") as f:
+        json.dump(existing, f, indent=4)
+
+    logger.info(f"Inventory file [{filename}] patched for VM [{name}]")
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "file": filename}
+    })
+
+
+def _deep_merge(base: dict, patch: dict):
+    """Recursively merge patch into base in-place."""
+    for key, value in patch.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 @vm_bp.route("/<name>", methods=["DELETE"])
 def delete_vm(name: str):
     logger = _get_logger()

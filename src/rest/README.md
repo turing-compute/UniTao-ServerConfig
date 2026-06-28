@@ -133,7 +133,8 @@ POST /api/v1/vms/<name>/commit
 |------|------|------|
 | GET | `/api/v1/vms/<name>/inventory` | 列出 inventory 文件 |
 | GET | `/api/v1/vms/<name>/inventory/<file>` | 获取文件内容和时间戳 |
-| POST | `/api/v1/vms/<name>/inventory` | 上传文件 |
+| POST | `/api/v1/vms/<name>/inventory` | 上传文件（覆盖） |
+| PATCH | `/api/v1/vms/<name>/inventory/<file>` | 更新文件（JSON 深度合并） |
 
 ### 上传文件
 
@@ -148,6 +149,22 @@ POST /api/v1/vms/<name>/inventory
 
 - 带 `name` 字段 → 保存为 `{name}.json`（覆盖同名文件）
 - 不带 `name` 字段 → 保存为 `{timestamp}.json`
+
+### 更新文件（深度合并）
+
+只更新指定字段，保留未提及的字段不变。适合 Orchestrator 只更新 `data.network` 而不碰 `data.public_keys`：
+
+```json
+PATCH /api/v1/vms/<name>/inventory/wireguard_network.json
+{
+  "data": {
+    "network": {
+      "assigned_ip": "10.200.0.1/32",
+      "peers": [...]
+    }
+  }
+}
+```
 
 ### 获取文件
 
