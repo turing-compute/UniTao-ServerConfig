@@ -73,10 +73,11 @@ echo "  Files moved to /opt/unitao/domain/wireguard/"
 sudo chmod +x /opt/unitao/domain/wireguard/*.py
 
 echo "  Verifying Python syntax ..."
+sudo rm -rf /opt/unitao/domain/wireguard/__pycache__
 for f in $FILES; do
-    if ! python3 -m py_compile "/opt/unitao/domain/wireguard/$f" 2>/dev/null; then
+    if ! sudo python3 -m py_compile "/opt/unitao/domain/wireguard/$f" 2>/dev/null; then
         echo "  ERROR: $f has syntax errors" >&2
-        python3 -m py_compile "/opt/unitao/domain/wireguard/$f" 2>&1
+        sudo python3 -m py_compile "/opt/unitao/domain/wireguard/$f" 2>&1
         exit 1
     fi
     echo "    $f OK"
