@@ -113,6 +113,7 @@ cd src/domain/wireguard
 - 安装 `wireguard-tools`
 - 创建 `wg_agent.conf`
 - 安装并 enable `wg-agent.service`
+- 启动 `wg-agent`
 
 ### 4. 验证 Agent 工作正常
 

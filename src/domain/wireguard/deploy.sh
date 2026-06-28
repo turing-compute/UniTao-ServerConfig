@@ -115,13 +115,18 @@ ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" \
     "sudo python3 ${AGENT_PKG_DIR}/install.py --network-config ${AGENT_DIR}/wireguard_network.json"
 
 echo ""
+echo "Starting agent ..."
+ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" "sudo systemctl start wg-agent"
+sleep 3
+ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" "systemctl is-active wg-agent && echo 'wg-agent is active' || echo 'WARN: wg-agent not active'"
+
+echo ""
 echo "=== Deploy complete ==="
 echo ""
+echo "  Agent is running. Verify it published wireguard_network.json:"
+echo "    curl -s \$HOST/api/v1/vms/<name>/inventory | python3 -m json.tool"
+echo ""
 echo "  Next steps:"
-echo "    1. SSH into VM:   ssh ${SSH_USER}@${VM_IP}"
-echo "    2. Start agent:   sudo systemctl start wg-agent"
-echo "    3. Check status:  sudo wg show wg0"
-echo "    4. Follow logs:   sudo journalctl -u wg-agent -f"
 echo ""
 echo "  Orchestrator: Post updated config via REST API:"
 echo "    POST /api/v1/vms/<name>/inventory"
