@@ -143,6 +143,69 @@ class WgAgent:
             if tmp and os.path.exists(tmp.name):
                 os.unlink(tmp.name)
 
+    def _inventory_patch(self, filename: str, data: dict) -> bool:
+        """PATCH an inventory file via curl (deep-merge, preserves other fields)."""
+        inv_config_path = os.path.join(
+            os.path.dirname(self._inventory_tool), "inventory.json"
+        )
+        try:
+            with open(inv_config_path, "r") as f:
+                inv_conf = json.load(f)
+            host = inv_conf.get("hostApiUrl", "")
+            vm_id = inv_conf.get("vmId", "")
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return False
+
+        if not host or not vm_id:
+            return False
+
+        url = f"{host}/api/v1/vms/{vm_id}/inventory/{filename}"
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", prefix="wg_patch_", delete=False
+            )
+            json.dump(data, tmp)
+            tmp.close()
+            result = subprocess.run(
+                ["curl", "-s", "-X", "PATCH", url,
+                 "-H", "Content-Type: application/json",
+                 "-d", f"@{tmp.name}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        finally:
+            if tmp and os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+
+    def _collect_status(self) -> list:
+        """Collect current WireGuard status as a list of key-value pairs."""
+        status = []
+        try:
+            r = subprocess.run(
+                ["wg", "show", self._network],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        status.append({"key": key.strip(), "value": val.strip()})
+        except FileNotFoundError:
+            pass
+        return status
+
+    def _report_status(self):
+        """PATCH status to inventory."""
+        status = self._collect_status()
+        self._inventory_patch(
+            f"{INVENTORY_CONFIG_NAME}.json",
+            {"data": {"status": status}},
+        )
+
     # -- Step 2: local config management ------------------------------------
 
     def _ensure_local_config(self, public_key: str) -> WgNetworkConfig:
@@ -352,6 +415,7 @@ class WgAgent:
                 else:
                     print(f"  Waiting for assigned_ip ...")
 
+            self._report_status()
             time.sleep(poll_interval)
 
 
