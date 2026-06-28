@@ -181,22 +181,32 @@ class WgAgent:
                 os.unlink(tmp.name)
 
     def _collect_status(self) -> list:
-        """Collect current WireGuard status as a list of key-value pairs."""
-        status = []
+        """Collect interface status. When up, includes recv/sent bytes from wg show."""
+        if not self._key_manager.interface_exists(self._network):
+            return [{"key": "state", "value": "down"}]
+
+        recv = sent = 0
         try:
             r = subprocess.run(
-                ["wg", "show", self._network],
+                ["wg", "show", self._network, "transfer"],
                 capture_output=True, text=True,
             )
             if r.returncode == 0:
-                for line in r.stdout.strip().split("\n"):
-                    line = line.strip()
-                    if ":" in line:
-                        key, val = line.split(":", 1)
-                        status.append({"key": key.strip(), "value": val.strip()})
+                parts = r.stdout.strip().split()
+                if len(parts) >= 2:
+                    recv = parts[0]
+                    sent = parts[1]
+                elif len(parts) >= 4:
+                    recv = f"{parts[0]} {parts[1]}"
+                    sent = f"{parts[2]} {parts[3]}"
         except FileNotFoundError:
             pass
-        return status
+
+        return [
+            {"key": "state", "value": "up"},
+            {"key": "recv_bytes", "value": str(recv) if recv else "0"},
+            {"key": "sent_bytes", "value": str(sent) if sent else "0"},
+        ]
 
     def _report_status(self):
         """PATCH status to inventory."""

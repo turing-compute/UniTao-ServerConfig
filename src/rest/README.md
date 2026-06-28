@@ -190,6 +190,12 @@ Peer 字段说明：
 | `disabled` | bool | 否 | `true` 跳过该 peer |
 | `id` | string/int | 否 | 内部标识符 |
 
+Agent 每轮 poll 会上报 `data.status` 到 `wireguard_network.json`：
+
+```json
+[{"key": "state", "value": "up"}, {"key": "recv_bytes", "value": "1234"}, {"key": "sent_bytes", "value": "5678"}]
+```
+
 ### 获取文件
 
 ```
