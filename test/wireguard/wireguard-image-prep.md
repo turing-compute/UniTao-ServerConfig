@@ -184,9 +184,8 @@ sudo shutdown -h now
 curl -s $HOST/api/v1/vms/wireguard-prep | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['virshState'])"
 # 应输出: notExists
 
-# 设为 stopped 状态
-curl -s -X PATCH $HOST/api/v1/vms -H "Content-Type: application/json" \
-  -d '{"id":"wireguard-prep","vmState":"stopped"}'
+# 停止（确保 vmState=stopped 才能 commit）
+curl -s -X POST $HOST/api/v1/vms/wireguard-prep/stop
 
 # Commit: 把 qcow2 变更写入 backing image
 curl -s -X POST $HOST/api/v1/vms/wireguard-prep/commit -H "Content-Type: application/json" -d '{}'

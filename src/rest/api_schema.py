@@ -18,7 +18,6 @@ _API_SCHEMA = {
                 "DELETE /api/v1/vms/<name>": "Delete VM (managed: destroy+remove dir; unmanaged: virsh destroy+undefine)",
                 "POST /api/v1/vms/<name>/start": "Start VM (set vmState=running)",
                 "POST /api/v1/vms/<name>/stop": "Stop VM (set vmState=stopped)",
-                "PATCH /api/v1/vms": "Patch VM state. Body: id*, vmState* (running|stopped)",
                 "POST /api/v1/vms/<name>/commit": "Commit qcow2 disk changes to backing image. Body: disk (int|string, optional). VM must be stopped+destroyed.",
                 "GET /api/v1/vms/<name>/inventory": "List inventory file names",
                 "GET /api/v1/vms/<name>/inventory/<f>": "Get inventory file with content and timestamp",

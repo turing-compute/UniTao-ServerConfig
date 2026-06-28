@@ -76,7 +76,6 @@ POST /api/v1/images/<name>
 | POST | `/api/v1/vms` | 创建/更新 VM |
 | GET | `/api/v1/vms/<name>` | 查看 VM 详情（virsh state、disk/net JSON、inventory） |
 | DELETE | `/api/v1/vms/<name>` | 删除 VM |
-| PATCH | `/api/v1/vms` | 修改 VM 状态 |
 | POST | `/api/v1/vms/<name>/start` | 启动 VM |
 | POST | `/api/v1/vms/<name>/stop` | 停止 VM |
 | POST | `/api/v1/vms/<name>/commit` | 将 qcow2 disk 变更提交到 backing image |
@@ -114,21 +113,6 @@ POST /api/v1/vms
 | shareInventoryData | bool | 否 | 注入 inventory_tool.py 和 report_network.py |
 | prepareDomainImage | bool | 否 | 注入 prep_image_for_commit.py |
 | diskSizeGB | int | 否 | 磁盘大小（GB） |
-
-### 修改 VM 状态
-
-```json
-PATCH /api/v1/vms
-{
-  "id": "my-vm",
-  "vmState": "stopped"
-}
-```
-
-| 字段 | 值 | 说明 |
-|------|-----|------|
-| vmState | `"running"` | 启动 VM |
-| vmState | `"stopped"` | 停止 VM（commit 前需要） |
 
 ### Commit Image
 
