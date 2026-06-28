@@ -59,6 +59,23 @@ def install_system_deps():
               file=sys.stderr)
 
 
+def enable_ip_forward():
+    """Enable IPv4/IPv6 forwarding via sysctl (required for WireGuard routing)."""
+    settings = (
+        ("net.ipv4.ip_forward", "1"),
+        ("net.ipv6.conf.all.forwarding", "1"),
+    )
+    conf_path = "/etc/sysctl.d/99-wireguard.conf"
+    with open(conf_path, "w") as f:
+        for key, val in settings:
+            f.write(f"{key} = {val}\n")
+    try:
+        subprocess.run(["sysctl", "--system"], capture_output=True)
+    except FileNotFoundError:
+        pass
+    print(f"  IP forwarding enabled ({conf_path})")
+
+
 def generate_agent_config(
     network_config_path: str,
     inventory_tool: str,
@@ -158,15 +175,19 @@ def main():
     print(f"  Network: {network}\n")
 
     # 1. Install system dependencies.
-    print("[1/3] System dependencies ...")
+    print("[1/4] System dependencies ...")
     install_system_deps()
 
-    # 2. Generate agent config (paths only, not the network config itself).
-    print("\n[2/3] Agent config ...")
+    # 2. Enable IP forwarding.
+    print("\n[2/4] IP forwarding ...")
+    enable_ip_forward()
+
+    # 3. Generate agent config (paths only, not the network config itself).
+    print("\n[3/4] Agent config ...")
     generate_agent_config(args.network_config, args.inventory_tool, args.wg_dir)
 
-    # 3. Systemd unit + enable.
-    print("\n[3/3] Systemd service ...")
+    # 4. Systemd unit + enable.
+    print("\n[4/4] Systemd service ...")
     install_systemd_unit(network)
     enable_systemd_unit()
 
