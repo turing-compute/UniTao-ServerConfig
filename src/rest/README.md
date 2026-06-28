@@ -160,11 +160,27 @@ PATCH /api/v1/vms/<name>/inventory/wireguard_network.json
   "data": {
     "network": {
       "assigned_ip": "10.200.0.1/32",
-      "peers": [...]
+      "listen_port": 51820,
+      "dns_servers": ["8.8.8.8"],
+      "peers": [
+        {
+          "publicKey": "aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcd=",
+          "ip": "10.200.0.2/32",
+          "endpoint": "192.168.1.105:51820"
+        }
+      ]
     }
   }
 }
 ```
+
+Peer 字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `publicKey` | string | 是 | WireGuard 公钥，44 字符 base64 |
+| `ip` | string | 是 | VPN IP（CIDR 格式），对应 wg.conf `AllowedIPs` |
+| `endpoint` | string | 是 | 可达地址 `host:port` |
 
 ### 获取文件
 
