@@ -49,9 +49,16 @@ def api(path: str, method: str = "GET", data: dict = None) -> dict:
         sys.exit(1)
 
 
-def ssh(host: str, *args) -> tuple:
+def ssh(host: str, *args, retries: int = 3) -> tuple:
+    """SSH with retry. Returns (returncode, stdout)."""
     cmd = ["ssh"] + SSH_OPTS + [f"{SSH_USER}@{host}"] + list(args)
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    for attempt in range(1, retries + 1):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.returncode, r.stdout
+        if attempt < retries:
+            print(f"  SSH failed (rc={r.returncode}), retry {attempt}/{retries} ...")
+            time.sleep(5)
     return r.returncode, r.stdout
 
 
