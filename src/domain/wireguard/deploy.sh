@@ -9,14 +9,16 @@
 #   4. Run install.py (wireguard-tools + agent config + systemd unit)
 #
 # Usage:
-#   ./deploy.sh <vm_ip> [ssh_user]
+#   ./deploy.sh <vm_ip> [ssh_user] [--ssh-key <path>]
 #
 #   vm_ip     — Target VM IP address (required)
 #   ssh_user  — SSH user (default: ubuntu)
+#   --ssh-key — Path to SSH private key file (optional, passed to ssh -i)
 #
 # Example:
 #   ./deploy.sh 192.168.1.104
 #   ./deploy.sh 192.168.1.104 root
+#   ./deploy.sh 192.168.1.104 ubuntu --ssh-key ~/.ssh/host_key
 #
 # Prerequisites:
 #   - SSH key loaded in ssh-agent (for HostKey-auth VMs)
@@ -24,9 +26,23 @@
 #
 set -euo pipefail
 
-VM_IP="${1:?Usage: $0 <vm_ip> [ssh_user]}"
+VM_IP="${1:?Usage: $0 <vm_ip> [ssh_user] [--ssh-key <path>]}"
 SSH_USER="${2:-ubuntu}"
+
+# Parse --ssh-key from remaining args (skip VM_IP and SSH_USER)
+SSH_KEY=""
+shift 2 2>/dev/null || true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ssh-key) SSH_KEY="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+if [[ -n "$SSH_KEY" ]]; then
+    SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
+fi
 
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENT_DIR="/opt/unitao"

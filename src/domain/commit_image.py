@@ -29,6 +29,7 @@ HOST = "http://localhost:5000"
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
             "-o", "ConnectTimeout=10"]
 SSH_USER = "ubuntu"
+SSH_KEY = None  # set from --key argument
 
 DOMAIN_PREP_PATH = "/opt/unitao/domain/{domain}/prep_image_for_commit.py"
 VM_PREP_PATH = "/opt/unitao-server-config/prep_image_for_commit.py"
@@ -51,7 +52,10 @@ def api(path: str, method: str = "GET", data: dict = None) -> dict:
 
 def ssh(host: str, *args, retries: int = 3) -> tuple:
     """SSH with retry. Returns (returncode, stdout)."""
-    cmd = ["ssh"] + SSH_OPTS + [f"{SSH_USER}@{host}"] + list(args)
+    cmd = ["ssh"] + SSH_OPTS
+    if SSH_KEY:
+        cmd += ["-i", SSH_KEY]
+    cmd += [f"{SSH_USER}@{host}"] + list(args)
     for attempt in range(1, retries + 1):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
@@ -82,8 +86,13 @@ def main():
     parser = argparse.ArgumentParser(description="Commit a prepared VM image")
     parser.add_argument("--domain", required=True, help="Domain name (e.g. wireguard)")
     parser.add_argument("--vm", required=True, help="VM name to commit")
+    parser.add_argument("--key", default=None, help="Path to SSH private key")
+    parser.add_argument("--user", default="ubuntu", help="SSH user (default: ubuntu)")
     args = parser.parse_args()
 
+    global SSH_KEY, SSH_USER
+    SSH_KEY = args.key
+    SSH_USER = args.user
     domain = args.domain
     vm_name = args.vm
 

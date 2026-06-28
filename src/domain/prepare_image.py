@@ -25,7 +25,6 @@ import urllib.request
 import urllib.error
 
 HOST = "http://localhost:5000"
-DEPLOY_USER = "ubuntu"
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
             "-o", "ConnectTimeout=10"]
 
@@ -60,6 +59,7 @@ def main():
     parser.add_argument("--key", required=True, help="Path to host private key")
     parser.add_argument("--vm", required=True, help="Source VM name")
     parser.add_argument("--script", required=True, help="Path to deploy.sh")
+    parser.add_argument("--user", default="ubuntu", help="SSH user (default: ubuntu)")
     args = parser.parse_args()
 
     key_path = os.path.expanduser(args.key)
@@ -166,27 +166,15 @@ def main():
     # ── 5. Add key and deploy ────────────────────────────────────────────
 
     print()
-    print("[5/5] Starting ssh-agent and deploying ...")
-
-    # Start ssh-agent and add key (deploy.sh needs the key in the agent)
-    agent_out = subprocess.run(
-        ["ssh-agent", "-s"], capture_output=True, text=True, check=True
-    ).stdout
-    for line in agent_out.strip().split("\n"):
-        # Format: "SSH_AUTH_SOCK=/tmp/...; export SSH_AUTH_SOCK;"
-        if "=" in line and "export" in line:
-            kv = line.split(";")[0].strip()
-            k, v = kv.split("=", 1)
-            os.environ[k] = v
-    subprocess.run(["ssh-add", key_path], check=True)
-    print("  Key added to ssh-agent.")
+    print("[5/5] Deploying ...")
 
     deploy_dir = os.path.dirname(deploy_script)
     deploy_name = os.path.basename(deploy_script)
 
-    print(f"  Running: cd {deploy_dir} && ./{deploy_name} {vm_ip} {DEPLOY_USER}")
+    deploy_args = [f"./{deploy_name}", vm_ip, args.user, "--ssh-key", key_path]
+    print(f"  Running: cd {deploy_dir} && {' '.join(deploy_args)}")
     subprocess.run(
-        [f"./{deploy_name}", vm_ip, DEPLOY_USER],
+        deploy_args,
         cwd=deploy_dir,
         check=True,
     )
