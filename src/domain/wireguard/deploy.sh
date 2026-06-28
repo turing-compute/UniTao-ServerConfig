@@ -17,7 +17,6 @@
 # Example:
 #   ./deploy.sh 192.168.1.104
 #   ./deploy.sh 192.168.1.104 root
-#   ./deploy.sh 192.168.1.104 ubuntu --no-fix-crlf
 #
 # Prerequisites:
 #   - SSH key loaded in ssh-agent (for HostKey-auth VMs)
@@ -65,21 +64,22 @@ sudo mkdir -p /opt/unitao/domain/wireguard
 sudo touch /opt/unitao/domain/__init__.py
 sudo touch /opt/unitao/domain/wireguard/__init__.py
 
-for f in wg_data.py wg_agent.py wg_config_builder.py wg_key_manager.py \
-         wg_agent_service.py install.py prep_image_for_commit.py; do
-    if [ -f "/tmp/$f" ]; then
-        sudo mv "/tmp/$f" "/opt/unitao/domain/wireguard/$f"
-    fi
+FILES="wg_data.py wg_agent.py wg_config_builder.py wg_key_manager.py wg_agent_service.py install.py prep_image_for_commit.py"
+for f in $FILES; do
+    [ -f "/tmp/$f" ] && sudo mv "/tmp/$f" "/opt/unitao/domain/wireguard/$f"
 done
 
 echo "  Files moved to /opt/unitao/domain/wireguard/"
-	sudo chmod +x /opt/unitao/domain/wireguard/*.py
-for f in wg_data.py wg_agent.py wg_config_builder.py wg_key_manager.py \
-         wg_agent_service.py install.py prep_image_for_commit.py; do
-    if ! python3 -c "import py_compile; py_compile.compile('/opt/unitao/domain/wireguard/'"$f"', doraise=True)" 2>/dev/null; then
-        echo "  ERROR: $f has syntax errors (likely encoding issue during transfer)" >&2
+sudo chmod +x /opt/unitao/domain/wireguard/*.py
+
+echo "  Verifying Python syntax ..."
+for f in $FILES; do
+    if ! python3 -m py_compile "/opt/unitao/domain/wireguard/$f" 2>/dev/null; then
+        echo "  ERROR: $f has syntax errors" >&2
+        python3 -m py_compile "/opt/unitao/domain/wireguard/$f" 2>&1
         exit 1
     fi
+    echo "    $f OK"
 done
 echo "  All files OK."
 REMOTE_SETUP
