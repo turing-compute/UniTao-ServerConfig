@@ -88,24 +88,15 @@ def main():
         sys.exit(1)
 
     vm_info = vm_data["data"]
-    os_image = ""
-    # Find disk baseImagePath
-    for k, v in vm_info.items():
-        if k.startswith("disk-") and isinstance(v, dict):
-            os_image = v.get("baseImagePath", "")
-            if os_image:
-                break
-    if not os_image:
-        req = vm_info.get("request.json", {})
-        os_image = req.get("osImage", "")
-    if not os_image:
-        print("ERROR: could not determine osImage from VM data")
-        sys.exit(1)
-
     req = vm_info.get("request.json", {})
+    os_image = req.get("osImage", "")
     cpu = req.get("cpu", 2)
     ram = req.get("ramInGB", 2)
     bridge = req.get("bridge", "ovs-br0")
+
+    if not os_image:
+        print("ERROR: could not determine osImage from VM data")
+        sys.exit(1)
 
     prep_vm = f"{vm_name}-prep"
     print(f"  Image:  {os_image}")
@@ -123,7 +114,7 @@ def main():
 
     print()
     print(f"[3/5] Creating prep VM '{prep_vm}' ...")
-    api("/api/v1/vms", method="POST", data={
+    req_body = {
         "id": prep_vm,
         "cpu": cpu,
         "ramInGB": ram,
@@ -136,7 +127,9 @@ def main():
         "authType": "HostKey",
         "shareInventoryData": True,
         "prepareDomainImage": True,
-    })
+    }
+    print(f"  Request: {json.dumps(req_body, indent=4)}")
+    api("/api/v1/vms", method="POST", data=req_body)
 
     time.sleep(3)
     api(f"/api/v1/vms/{prep_vm}/start", method="POST")
