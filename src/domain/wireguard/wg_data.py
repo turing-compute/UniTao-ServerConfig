@@ -186,6 +186,8 @@ class WgNetworkConfig:
         DATA_NETWORK_LISTEN_PORT   = "listen_port"
         DATA_NETWORK_DNS_SERVERS   = "dns_servers"
         DATA_NETWORK_PEERS         = "peers"
+        DATA_NETWORK_POST_UP      = "post_up"
+        DATA_NETWORK_POST_DOWN    = "post_down"
 
     class PeerKey:
         PUBLIC_KEY = "publicKey"
@@ -303,6 +305,34 @@ class WgNetworkConfig:
                     f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_PEERS}] must be a list"
                 )
 
+        # --- data.network.post_up: 可选, list[str] 或 str ---
+        post_up = net.get(K.DATA_NETWORK_POST_UP, None)
+        if post_up is not None:
+            if not isinstance(post_up, (list, str)):
+                raise ValueError(
+                    f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_POST_UP}] must be a string or list of strings"
+                )
+            if isinstance(post_up, list):
+                for i, cmd in enumerate(post_up):
+                    if not isinstance(cmd, str):
+                        raise ValueError(
+                            f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_POST_UP}][{i}] must be a string"
+                        )
+
+        # --- data.network.post_down: 可选, list[str] 或 str ---
+        post_down = net.get(K.DATA_NETWORK_POST_DOWN, None)
+        if post_down is not None:
+            if not isinstance(post_down, (list, str)):
+                raise ValueError(
+                    f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_POST_DOWN}] must be a string or list of strings"
+                )
+            if isinstance(post_down, list):
+                for i, cmd in enumerate(post_down):
+                    if not isinstance(cmd, str):
+                        raise ValueError(
+                            f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_POST_DOWN}][{i}] must be a string"
+                        )
+
     # ── 属性访问器 ──────────────────────────────────────────────────────
 
     @property
@@ -333,6 +363,24 @@ class WgNetworkConfig:
         """Peer 列表 [{publicKey, ip, endpoint}, ...]."""
         net = self._ensure_network()
         return list(net.get(self.Key.DATA_NETWORK_PEERS, []))
+
+    @property
+    def post_up(self) -> list | None:
+        """PostUp 命令列表。"""
+        net = self._ensure_network()
+        val = net.get(self.Key.DATA_NETWORK_POST_UP, None)
+        if val is None:
+            return None
+        return val if isinstance(val, list) else [val]
+
+    @property
+    def post_down(self) -> list | None:
+        """PostDown 命令列表。"""
+        net = self._ensure_network()
+        val = net.get(self.Key.DATA_NETWORK_POST_DOWN, None)
+        if val is None:
+            return None
+        return val if isinstance(val, list) else [val]
 
     @property
     def has_network_config(self) -> bool:
@@ -402,6 +450,8 @@ class WgNetworkConfig:
             self.Key.DATA_NETWORK_LISTEN_PORT,
             self.Key.DATA_NETWORK_DNS_SERVERS,
             self.Key.DATA_NETWORK_PEERS,
+            self.Key.DATA_NETWORK_POST_UP,
+            self.Key.DATA_NETWORK_POST_DOWN,
         ):
             if key in net:
                 local_net[key] = net[key]

@@ -66,9 +66,13 @@ class WgConfigBuilder:
         lines.append(f"MTU = {mtu}")
 
         if post_up:
-            lines.append(f"PostUp = {post_up}")
+            items = post_up if isinstance(post_up, list) else [post_up]
+            for cmd in items:
+                lines.append(f"PostUp = {cmd}")
         if post_down:
-            lines.append(f"PostDown = {post_down}")
+            items = post_down if isinstance(post_down, list) else [post_down]
+            for cmd in items:
+                lines.append(f"PostDown = {cmd}")
 
         return "\n".join(lines)
 
@@ -150,6 +154,8 @@ class WgConfigBuilder:
             address=network.assigned_ip,
             listen_port=network.listen_port,
             dns_servers=network.dns_servers,
+            post_up=network.post_up,
+            post_down=network.post_down,
         )
         sections.append(iface)
 
