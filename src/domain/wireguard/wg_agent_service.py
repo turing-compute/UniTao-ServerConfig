@@ -31,10 +31,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/python3 {agent_dir}/wg_agent.py
-ExecStop=/usr/bin/wg-quick down {network}
+Type=simple
+Environment=PYTHONPATH=/opt/unitao
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 {agent_dir}/domain/wireguard/wg_agent.py
+ExecStop=/usr/bin/systemctl stop wg-quick@{network}
 StandardOutput=journal
 StandardError=journal
 
@@ -60,21 +61,12 @@ def _run_systemctl(*args) -> tuple:
         return False, "systemctl not found"
 
 
-def _read_network_name() -> str | None:
-    """从 agent config → networkConfigPath 读取 networkName。"""
-    if not os.path.isfile(AGENT_CONFIG_PATH):
-        return None
-    try:
-        with open(AGENT_CONFIG_PATH, "r") as f:
-            agent_conf = json.load(f)
-        network_config_path = agent_conf.get("networkConfigPath", None)
-        if not network_config_path or not os.path.isfile(network_config_path):
-            return None
-        with open(network_config_path, "r") as f:
-            network_conf = json.load(f)
-        return network_conf.get("networkName", None)
-    except (json.JSONDecodeError, OSError):
-        return None
+def _read_network_name() -> str:
+    """返回 WireGuard 接口名。
+
+    FIXME: Hardcoded to "wg0" for now.
+    """
+    return "wg0"
 
 
 def install():

@@ -151,50 +151,50 @@ def ip_in_subnet(ip: str, subnet_cidr: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class WgNetworkConfig:
-    """WireGuard Mesh 网络配置的校验和承载。
+    """WireGuard 网络配置的校验和承载。
 
-    描述一个 VM Mesh 网络的参数。配置文件由外部应用或管理员放置在 VM image 中
-    或通过 cloud-init 注入，VM Agent 启动时读取。
+    wireguard_network.json 和 wireguard_network_inv.json 共享同一 schema。
 
-    JSON Schema (在 VM 上的路径由 Agent 配置决定，例如 /opt/unitao/wg-mesh.json):
+    JSON Schema:
         {
-          "networkName": "wg-mesh",             // 必填, string, 网络唯一标识
-          "subnet": "10.200.0.0/24",            // 必填, CIDR, VPN 子网
-          "listenPort": 51820,                  // 必填, int 1-65535, VM 监听端口
-          "dnsServers": ["10.200.0.1"],         // 可选, [ip]
-          "mtu": 1420,                          // 可选, int 1280-1500, 默认 1420
-          "persistentKeepalive": 25,            // 可选, int 0-65535, 默认 25
-          "routes": [                           // 可选, [route], 通过 VPN 的路由
-            {"destination": "10.200.0.0/24", "description": "VPN 子网"}
-          ],
-          "postUp": "iptables -A FORWARD -i %i -j ACCEPT",    // 可选
-          "postDown": "iptables -D FORWARD -i %i -j ACCEPT"   // 可选
+          "data": {
+            "public_keys": {
+              "primary": "base64..."
+            },
+            "network": {
+              "assigned_ip": "10.200.0.1/32",
+              "listen_port": 51820,
+              "dns_servers": ["8.8.8.8"],
+              "peers": [
+                {
+                  "ip": "10.200.0.2/32",
+                  "endpoint": "192.168.1.105:51820",
+                  "publicKey": "base64..."
+                }
+              ]
+            }
+          }
         }
     """
 
     class Key:
-        NETWORK_NAME         = "networkName"
-        SUBNET               = "subnet"
-        LISTEN_PORT          = "listenPort"
-        DNS_SERVERS          = "dnsServers"
-        MTU                  = "mtu"
-        PERSISTENT_KEEPALIVE = "persistentKeepalive"
-        ROUTES               = "routes"
-        POST_UP              = "postUp"
-        POST_DOWN            = "postDown"
+        DATA                       = "data"
+        DATA_PUBLIC_KEYS           = "public_keys"
+        DATA_PUBLIC_KEYS_PRIMARY   = "primary"
+        DATA_NETWORK               = "network"
+        DATA_NETWORK_ASSIGNED_IP   = "assigned_ip"
+        DATA_NETWORK_LISTEN_PORT   = "listen_port"
+        DATA_NETWORK_DNS_SERVERS   = "dns_servers"
+        DATA_NETWORK_PEERS         = "peers"
 
-    DEFAULT_MTU = 1420
-    DEFAULT_KEEPALIVE = 25
+    class PeerKey:
+        PUBLIC_KEY = "publicKey"
+        IP         = "ip"
+        ENDPOINT   = "endpoint"
+
+    DEFAULT_LISTEN_PORT = 51820
 
     def __init__(self, data: dict):
-        """从 JSON 字典构建并校验。
-
-        Args:
-            data: 网络配置字典
-
-        Raises:
-            ValueError: 校验失败
-        """
         if not isinstance(data, dict):
             raise ValueError(
                 f"WgNetworkConfig: data must be a dict, got {type(data).__name__}"
@@ -202,176 +202,211 @@ class WgNetworkConfig:
         self._data = data
         self.validate()
 
+    # ── data 子结构访问 ─────────────────────────────────────────────────
+
+    def _ensure_data(self):
+        if self.Key.DATA not in self._data:
+            self._data[self.Key.DATA] = {}
+        return self._data[self.Key.DATA]
+
+    def _ensure_public_keys(self):
+        d = self._ensure_data()
+        if self.Key.DATA_PUBLIC_KEYS not in d:
+            d[self.Key.DATA_PUBLIC_KEYS] = {}
+        return d[self.Key.DATA_PUBLIC_KEYS]
+
+    def _ensure_network(self):
+        d = self._ensure_data()
+        if self.Key.DATA_NETWORK not in d:
+            d[self.Key.DATA_NETWORK] = {}
+        return d[self.Key.DATA_NETWORK]
+
+    # ── 校验 ────────────────────────────────────────────────────────────
+
     def validate(self):
-        """校验网络配置的合法性和完整性。
-
-        校验规则:
-            networkName:         必填, 非空 str
-            subnet:              必填, 合法 CIDR, netmask 8-30
-            listenPort:          必填, int, 1-65535
-            dnsServers:          若存在: list[str], 每项合法 IPv4
-            mtu:                 若存在: int, 1280-1500
-            persistentKeepalive: 若存在: int, 0-65535
-            routes:              若存在: list[dict], 每项 .destination 合法 CIDR
-            postUp/postDown:     若存在: str
-
-        Raises:
-            ValueError: 校验失败
-        """
         K = self.Key
         data = self._data
 
-        # --- networkName: 必填, 非空 str ---
-        if K.NETWORK_NAME not in data:
-            raise ValueError(f"WgNetworkConfig: missing required key [{K.NETWORK_NAME}]")
-        name = data[K.NETWORK_NAME]
-        if not isinstance(name, str) or not name.strip():
+        # --- data: 必填, dict ---
+        if K.DATA not in data:
+            raise ValueError(f"WgNetworkConfig: missing [{K.DATA}]")
+        d = data[K.DATA]
+        if not isinstance(d, dict):
             raise ValueError(
-                f"WgNetworkConfig: [{K.NETWORK_NAME}] must be a non-empty string, got [{name}]"
+                f"WgNetworkConfig: [{K.DATA}] must be a dict"
             )
 
-        # --- subnet: 必填, 合法 CIDR, netmask 8-30 ---
-        if K.SUBNET not in data:
-            raise ValueError(f"WgNetworkConfig: missing required key [{K.SUBNET}]")
-        subnet = data[K.SUBNET]
-        validate_cidr(subnet)
-        _, prefix = parse_cidr(subnet)
-        if prefix < 8 or prefix > 30:
+        # --- data.public_keys: 必填, dict ---
+        if K.DATA_PUBLIC_KEYS not in d:
             raise ValueError(
-                f"WgNetworkConfig: [{K.SUBNET}] netmask must be 8-30, got /{prefix} in [{subnet}]"
+                f"WgNetworkConfig: missing [{K.DATA}.{K.DATA_PUBLIC_KEYS}]"
+            )
+        pkeys = d[K.DATA_PUBLIC_KEYS]
+        if not isinstance(pkeys, dict):
+            raise ValueError(
+                f"WgNetworkConfig: [{K.DATA}.{K.DATA_PUBLIC_KEYS}] must be a dict"
             )
 
-        # --- listenPort: 必填, int, 1-65535 ---
-        if K.LISTEN_PORT not in data:
-            raise ValueError(f"WgNetworkConfig: missing required key [{K.LISTEN_PORT}]")
-        port = data[K.LISTEN_PORT]
-        if not isinstance(port, int) or port < 1 or port > 65535:
+        # --- data.public_keys.primary: 可选, str (空字符串表示未生成) ---
+        pk = pkeys.get(K.DATA_PUBLIC_KEYS_PRIMARY, None)
+        if pk is not None and pk != "" and (not isinstance(pk, str) or not pk.strip()):
             raise ValueError(
-                f"WgNetworkConfig: [{K.LISTEN_PORT}] must be int 1-65535, got [{port}]"
+                f"WgNetworkConfig: [{K.DATA}.{K.DATA_PUBLIC_KEYS}.{K.DATA_PUBLIC_KEYS_PRIMARY}] must be a string"
             )
 
-        # --- dnsServers: 可选, list[str], 每项合法 IPv4 ---
-        if K.DNS_SERVERS in data:
-            dns = data[K.DNS_SERVERS]
+        # --- data.network: 必填, dict ---
+        if K.DATA_NETWORK not in d:
+            raise ValueError(
+                f"WgNetworkConfig: missing [{K.DATA}.{K.DATA_NETWORK}]"
+            )
+        net = d[K.DATA_NETWORK]
+        if not isinstance(net, dict):
+            raise ValueError(
+                f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}] must be a dict"
+            )
+
+        # --- data.network.assigned_ip: 可选, 合法 CIDR (空字符串/不存在表示未分配) ---
+        aip = net.get(K.DATA_NETWORK_ASSIGNED_IP, None)
+        if aip is not None and aip != "":
+            if not isinstance(aip, str):
+                raise ValueError(
+                    f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_ASSIGNED_IP}] must be a string"
+                )
+            validate_cidr(aip)
+
+        # --- data.network.listen_port: 可选, int 1-65535 ---
+        lp = net.get(K.DATA_NETWORK_LISTEN_PORT, None)
+        if lp is not None and (not isinstance(lp, int) or lp < 1 or lp > 65535):
+            raise ValueError(
+                f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_LISTEN_PORT}] must be int 1-65535"
+            )
+
+        # --- data.network.dns_servers: 可选, list[str] ---
+        dns = net.get(K.DATA_NETWORK_DNS_SERVERS, None)
+        if dns is not None:
             if not isinstance(dns, list):
                 raise ValueError(
-                    f"WgNetworkConfig: [{K.DNS_SERVERS}] must be a list, got {type(dns).__name__}"
+                    f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_DNS_SERVERS}] must be a list"
                 )
             for i, server in enumerate(dns):
                 if not isinstance(server, str):
                     raise ValueError(
-                        f"WgNetworkConfig: [{K.DNS_SERVERS}][{i}] must be a string"
+                        f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_DNS_SERVERS}][{i}] must be a string"
                     )
                 validate_ipv4(server)
 
-        # --- mtu: 可选, int, 1280-1500 ---
-        if K.MTU in data:
-            mtu = data[K.MTU]
-            if not isinstance(mtu, int) or mtu < 1280 or mtu > 1500:
+        # --- data.network.peers: 可选, list[dict] ---
+        peers = net.get(K.DATA_NETWORK_PEERS, None)
+        if peers is not None:
+            if not isinstance(peers, list):
                 raise ValueError(
-                    f"WgNetworkConfig: [{K.MTU}] must be int 1280-1500, got [{mtu}]"
+                    f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_PEERS}] must be a list"
                 )
 
-        # --- persistentKeepalive: 可选, int, 0-65535 ---
-        if K.PERSISTENT_KEEPALIVE in data:
-            keepalive = data[K.PERSISTENT_KEEPALIVE]
-            if not isinstance(keepalive, int) or keepalive < 0 or keepalive > 65535:
-                raise ValueError(
-                    f"WgNetworkConfig: [{K.PERSISTENT_KEEPALIVE}] must be int 0-65535, got [{keepalive}]"
-                )
-
-        # --- routes: 可选, list[dict], 每项 .destination 合法 CIDR ---
-        if K.ROUTES in data:
-            routes = data[K.ROUTES]
-            if not isinstance(routes, list):
-                raise ValueError(
-                    f"WgNetworkConfig: [{K.ROUTES}] must be a list, got {type(routes).__name__}"
-                )
-            for i, route in enumerate(routes):
-                if not isinstance(route, dict):
-                    raise ValueError(
-                        f"WgNetworkConfig: [{K.ROUTES}][{i}] must be a dict"
-                    )
-                if "destination" not in route:
-                    raise ValueError(
-                        f"WgNetworkConfig: [{K.ROUTES}][{i}] missing [destination]"
-                    )
-                validate_cidr(route["destination"])
-
-        # --- postUp: 可选, str ---
-        if K.POST_UP in data:
-            if not isinstance(data[K.POST_UP], str):
-                raise ValueError(
-                    f"WgNetworkConfig: [{K.POST_UP}] must be a string"
-                )
-
-        # --- postDown: 可选, str ---
-        if K.POST_DOWN in data:
-            if not isinstance(data[K.POST_DOWN], str):
-                raise ValueError(
-                    f"WgNetworkConfig: [{K.POST_DOWN}] must be a string"
-                )
-
-    # ── 属性访问器 ──────────────────────────────────────────────────────────
+    # ── 属性访问器 ──────────────────────────────────────────────────────
 
     @property
-    def network_name(self) -> str:
-        return self._data[self.Key.NETWORK_NAME]
+    def primary_public_key(self) -> str:
+        """Agent 生成的 primary 公钥，未生成时返回空字符串。"""
+        pk = self._ensure_public_keys()
+        return pk.get(self.Key.DATA_PUBLIC_KEYS_PRIMARY, "")
 
     @property
-    def subnet(self) -> str:
-        return self._data[self.Key.SUBNET]
+    def assigned_ip(self) -> str | None:
+        """VM 在 VPN 中的 IP (CIDR)，Orchestrator 分配。未分配时返回 None。"""
+        net = self._ensure_network()
+        aip = net.get(self.Key.DATA_NETWORK_ASSIGNED_IP, None)
+        return aip if aip else None
 
     @property
     def listen_port(self) -> int:
-        return self._data[self.Key.LISTEN_PORT]
+        net = self._ensure_network()
+        return net.get(self.Key.DATA_NETWORK_LISTEN_PORT, self.DEFAULT_LISTEN_PORT)
 
     @property
     def dns_servers(self) -> list:
-        return self._data.get(self.Key.DNS_SERVERS, [])
+        net = self._ensure_network()
+        return net.get(self.Key.DATA_NETWORK_DNS_SERVERS, [])
 
     @property
-    def mtu(self) -> int:
-        return self._data.get(self.Key.MTU, self.DEFAULT_MTU)
+    def peers(self) -> list:
+        """Peer 列表 [{publicKey, ip, endpoint}, ...]."""
+        net = self._ensure_network()
+        return list(net.get(self.Key.DATA_NETWORK_PEERS, []))
 
     @property
-    def persistent_keepalive(self) -> int:
-        return self._data.get(self.Key.PERSISTENT_KEEPALIVE, self.DEFAULT_KEEPALIVE)
+    def has_network_config(self) -> bool:
+        """assigned_ip 非空即可生成 wg.conf。"""
+        aip = self.assigned_ip
+        return aip is not None and aip != ""
 
-    @property
-    def routes(self) -> list:
-        return self._data.get(self.Key.ROUTES, [])
-
-    @property
-    def post_up(self) -> str | None:
-        return self._data.get(self.Key.POST_UP, None)
-
-    @property
-    def post_down(self) -> str | None:
-        return self._data.get(self.Key.POST_DOWN, None)
+    # ── 序列化 ──────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
-        """导出为字典。"""
         return dict(self._data)
+
+    def save_to_file(self, path: str):
+        with open(path, "w") as f:
+            json.dump(self._data, f, indent=2)
+            f.write("\n")
 
     @staticmethod
     def from_file(path: str) -> "WgNetworkConfig":
-        """从 JSON 文件加载网络配置。
-
-        Args:
-            path: JSON 文件路径
-
-        Returns:
-            WgNetworkConfig 实例
-
-        Raises:
-            FileNotFoundError: 文件不存在
-            json.JSONDecodeError: JSON 解析失败
-            ValueError: 校验失败
-        """
         with open(path, "r") as f:
             data = json.load(f)
         return WgNetworkConfig(data)
+
+    # ── 工厂方法 ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def create_initial(public_key: str) -> "WgNetworkConfig":
+        """创建初始 wireguard_network.json（Agent 首次运行时调用）。
+
+        Args:
+            public_key: Agent 生成的 primary 公钥
+        """
+        if not isinstance(public_key, str) or not public_key.strip():
+            raise ValueError("create_initial: public_key must be a non-empty string")
+        data = {
+            WgNetworkConfig.Key.DATA: {
+                WgNetworkConfig.Key.DATA_PUBLIC_KEYS: {
+                    WgNetworkConfig.Key.DATA_PUBLIC_KEYS_PRIMARY: public_key,
+                },
+                WgNetworkConfig.Key.DATA_NETWORK: {
+                    WgNetworkConfig.Key.DATA_NETWORK_PEERS: [],
+                },
+            },
+        }
+        return WgNetworkConfig(data)
+
+    # ── 合并 ────────────────────────────────────────────────────────────
+
+    def merge_network_from(self, other: "WgNetworkConfig", api_timestamp: str) -> bool:
+        """从 inv 配置合并 data.network，保留 data.public_keys。
+
+        比对由调用方通过 API timestamp 判断，此处总是执行合并。
+
+        Args:
+            other:         从 inventory 下载的 WgNetworkConfig
+            api_timestamp: Host REST API 返回的文件修改时间
+
+        Returns:
+            True (总是合并)
+        """
+        net = other._ensure_network()
+        local_net = self._ensure_network()
+
+        # 覆盖 network 字段
+        for key in (
+            self.Key.DATA_NETWORK_ASSIGNED_IP,
+            self.Key.DATA_NETWORK_LISTEN_PORT,
+            self.Key.DATA_NETWORK_DNS_SERVERS,
+            self.Key.DATA_NETWORK_PEERS,
+        ):
+            if key in net:
+                local_net[key] = net[key]
+
+        return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════

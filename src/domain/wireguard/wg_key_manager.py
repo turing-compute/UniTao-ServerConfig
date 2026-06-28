@@ -31,8 +31,8 @@ class WgKeyManager:
             key_dir: 密钥存储根目录，默认 /etc/wireguard
 
         密钥路径:
-            私钥: {key_dir}/{network}/private.key
-            公钥: {key_dir}/{network}/public.key
+            私钥: {key_dir}/{network}/primary.pem
+            公钥: {key_dir}/{network}/primary.pub.pem
         """
         if not network or not network.strip():
             raise ValueError("WgKeyManager: network name must be a non-empty string")
@@ -46,11 +46,11 @@ class WgKeyManager:
 
     def private_key_path(self) -> str:
         """私钥文件路径。"""
-        return os.path.join(self._network_dir, "private.key")
+        return os.path.join(self._network_dir, "primary.pem")
 
     def public_key_path(self) -> str:
         """公钥文件路径。"""
-        return os.path.join(self._network_dir, "public.key")
+        return os.path.join(self._network_dir, "primary.pub.pem")
 
     def keys_exist(self) -> bool:
         """密钥对是否已存在 (检查私钥文件)。"""

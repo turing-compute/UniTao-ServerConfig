@@ -4,8 +4,10 @@
 
 Run this during image preparation (before prep_image_for_commit.py + commit).
 
-Generates an agent config file that tells wg_agent.py where everything is,
-then creates and enables the systemd unit.
+Steps:
+    1. Install system dependencies (wireguard-tools via apt-get)
+    2. Generate wg_agent.conf telling wg_agent.py where everything is
+    3. Create and enable the systemd unit
 
 Usage:
     python3 install.py --network-config ./wg-mesh.json
@@ -14,6 +16,8 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
+import sys
 
 SYSTEMD_DIR = "/etc/systemd/system"
 AGENT_DIR = "/opt/unitao"
@@ -29,13 +33,30 @@ def ensure_dir(path: str):
 
 
 def read_network_name(network_config_path: str) -> str:
-    """Read networkName from the WgNetworkConfig JSON."""
-    with open(network_config_path, "r") as f:
-        data = json.load(f)
-    name = data.get("networkName", "")
-    if not name:
-        raise ValueError(f"Missing [networkName] in {network_config_path}")
-    return name
+    """Return the WireGuard interface name.
+
+    FIXME: Hardcoded to "wg0" for now.
+    In the future, the network name may be stored in the config or
+    use "wg{network_idx}" convention for multiple networks.
+    """
+    return "wg0"
+
+
+def install_system_deps():
+    """Install system packages required by WireGuard (if not already installed)."""
+    try:
+        result = subprocess.run(
+            ["apt-get", "install", "-y", "wireguard-tools"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"  [WARN] apt-get install failed: {result.stderr.strip()}",
+                  file=sys.stderr)
+        else:
+            print(f"  wireguard-tools installed.")
+    except FileNotFoundError:
+        print(f"  [WARN] apt-get not found, skipping system dependency install.",
+              file=sys.stderr)
 
 
 def generate_agent_config(
@@ -80,10 +101,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/python3 {AGENT_DIR}/wg_agent.py
-ExecStop=/usr/bin/wg-quick down {network}
+Type=simple
+Environment=PYTHONPATH=/opt/unitao
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 {AGENT_DIR}/domain/wireguard/wg_agent.py
+ExecStop=/usr/bin/systemctl stop wg-quick@{network}
 StandardOutput=journal
 StandardError=journal
 
@@ -135,12 +157,16 @@ def main():
     print("=== Installing wg_agent service ===\n")
     print(f"  Network: {network}\n")
 
-    # 1. Generate agent config (paths only, not the network config itself).
-    print("[1/2] Agent config ...")
+    # 1. Install system dependencies.
+    print("[1/3] System dependencies ...")
+    install_system_deps()
+
+    # 2. Generate agent config (paths only, not the network config itself).
+    print("\n[2/3] Agent config ...")
     generate_agent_config(args.network_config, args.inventory_tool, args.wg_dir)
 
-    # 2. Systemd unit + enable.
-    print("\n[2/2] Systemd service ...")
+    # 3. Systemd unit + enable.
+    print("\n[3/3] Systemd service ...")
     install_systemd_unit(network)
     enable_systemd_unit()
 

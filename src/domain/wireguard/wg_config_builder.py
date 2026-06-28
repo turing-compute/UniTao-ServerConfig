@@ -77,15 +77,15 @@ class WgConfigBuilder:
         """为单个 Peer 生成 [Peer] 段。
 
         Args:
-            peer:                  Peer dict {public_key, endpoint, assigned_id, allowed_ips}
+            peer:                  Peer dict {publicKey, ip, endpoint}
             persistent_keepalive:  保活间隔秒数 (默认 25)
 
         Returns:
             [Peer] 段文本
         """
-        pubkey = peer.get("public_key", "")
+        pubkey = peer.get("publicKey", "")
         endpoint = peer.get("endpoint", None)
-        allowed_ips = peer.get("allowed_ips", [])
+        ip = peer.get("ip", "")
 
         lines = []
 
@@ -98,8 +98,8 @@ class WgConfigBuilder:
         if endpoint:
             lines.append(f"Endpoint = {endpoint}")
 
-        if allowed_ips:
-            lines.append(f"AllowedIPs = {', '.join(allowed_ips)}")
+        if ip:
+            lines.append(f"AllowedIPs = {ip}")
 
         lines.append(f"PersistentKeepalive = {persistent_keepalive}")
 
@@ -108,17 +108,13 @@ class WgConfigBuilder:
     @staticmethod
     def build_vm_config(
         network: WgNetworkConfig,
-        self_ip: str,
         private_key: str,
-        peers: list,
     ) -> str:
         """生成 VM 侧完整 wg.conf。
 
         Args:
             network:     WgNetworkConfig 实例
-            self_ip:     VM 自身 VPN 地址 (CIDR)
             private_key: VM 私钥
-            peers:       Peer 列表 [{public_key, endpoint, assigned_id, allowed_ips}, ...]
 
         Returns:
             完整 wg.conf 文本
@@ -128,21 +124,17 @@ class WgConfigBuilder:
         # [Interface]
         iface = WgConfigBuilder.build_interface_section(
             private_key=private_key,
-            address=self_ip,
+            address=network.assigned_ip,
             listen_port=network.listen_port,
             dns_servers=network.dns_servers,
-            mtu=network.mtu,
-            post_up=network.post_up,
-            post_down=network.post_down,
         )
         sections.append(iface)
 
         # [Peer] x N
-        for peer_dict in peers:
+        for peer_dict in network.peers:
             sections.append("")
             peer_section = WgConfigBuilder.build_peer_section(
                 peer=peer_dict,
-                persistent_keepalive=network.persistent_keepalive,
             )
             sections.append(peer_section)
 
