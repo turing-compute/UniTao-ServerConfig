@@ -87,6 +87,10 @@ class WgConfigBuilder:
         if not pubkey:
             return None
 
+        # disabled: skip this peer entirely
+        if peer.get("disabled", False):
+            return None
+
         endpoint = peer.get("endpoint", None)
         ip = peer.get("ip", "")
         allowed_ips = peer.get("allowed_ips", None)
@@ -95,11 +99,21 @@ class WgConfigBuilder:
 
         lines = []
 
-        comment = endpoint if endpoint else pubkey[:12]
-        lines.append(f"# Peer: {comment}")
+        # Comment line: prefer description, fall back to id or endpoint
+        desc = peer.get("description", "") or peer.get("comment", "")
+        peer_id = peer.get("id", "") or peer.get("peer-id", "")
+        if desc:
+            lines.append(f"# {desc}")
+        elif peer_id:
+            lines.append(f"# Peer {peer_id}")
 
         lines.append("[Peer]")
         lines.append(f"PublicKey = {pubkey}")
+
+        # PresharedKey
+        psk = peer.get("presharedKey", "")
+        if psk:
+            lines.append(f"PresharedKey = {psk}")
 
         if endpoint:
             lines.append(f"Endpoint = {endpoint}")
@@ -107,7 +121,10 @@ class WgConfigBuilder:
         if allowed_ips:
             lines.append(f"AllowedIPs = {', '.join(allowed_ips)}")
 
-        lines.append(f"PersistentKeepalive = {persistent_keepalive}")
+        # Peer-level keepalive overrides global default
+        keepalive = peer.get("persistentKeepalive", persistent_keepalive)
+        if keepalive > 0:
+            lines.append(f"PersistentKeepalive = {keepalive}")
 
         return "\n".join(lines)
 

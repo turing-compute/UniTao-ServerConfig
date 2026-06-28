@@ -178,10 +178,17 @@ Peer 字段说明：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
 | `publicKey` | string | 是 | WireGuard 公钥，44 字符 base64 |
 | `endpoint` | string | 是 | 可达地址 `host:port` |
 | `ip` | string | 否 | 单个 VPN IP（CIDR），等价于 `allowed_ips: [ip]` |
 | `allowed_ips` | list[string] | 否 | 可达 IP 范围列表（CIDR），默认使用 `ip` |
+| `persistentKeepalive` | int | 否 | 保活包间隔（秒），默认 25 |
+| `presharedKey` | string | 否 | 预共享密钥（PSK） |
+| `description` | string | 否 | 备注，写入 wg.conf 注释 |
+| `disabled` | bool | 否 | `true` 跳过该 peer |
+| `id` | string/int | 否 | 内部标识符 |
 
 ### 获取文件
 
