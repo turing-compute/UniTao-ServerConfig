@@ -89,6 +89,9 @@ class WgConfigBuilder:
 
         endpoint = peer.get("endpoint", None)
         ip = peer.get("ip", "")
+        allowed_ips = peer.get("allowed_ips", None)
+        if allowed_ips is None and ip:
+            allowed_ips = [ip]
 
         lines = []
 
@@ -101,8 +104,8 @@ class WgConfigBuilder:
         if endpoint:
             lines.append(f"Endpoint = {endpoint}")
 
-        if ip:
-            lines.append(f"AllowedIPs = {ip}")
+        if allowed_ips:
+            lines.append(f"AllowedIPs = {', '.join(allowed_ips)}")
 
         lines.append(f"PersistentKeepalive = {persistent_keepalive}")
 

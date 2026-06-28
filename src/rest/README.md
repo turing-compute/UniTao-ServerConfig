@@ -179,8 +179,9 @@ Peer 字段说明：
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `publicKey` | string | 是 | WireGuard 公钥，44 字符 base64 |
-| `ip` | string | 是 | VPN IP（CIDR 格式），对应 wg.conf `AllowedIPs` |
 | `endpoint` | string | 是 | 可达地址 `host:port` |
+| `ip` | string | 否 | 单个 VPN IP（CIDR），等价于 `allowed_ips: [ip]` |
+| `allowed_ips` | list[string] | 否 | 可达 IP 范围列表（CIDR），默认使用 `ip` |
 
 ### 获取文件
 
