@@ -73,7 +73,7 @@ class WgConfigBuilder:
         return "\n".join(lines)
 
     @staticmethod
-    def build_peer_section(peer: dict, persistent_keepalive: int = 25) -> str:
+    def build_peer_section(peer: dict, persistent_keepalive: int = 25) -> str | None:
         """为单个 Peer 生成 [Peer] 段。
 
         Args:
@@ -81,9 +81,12 @@ class WgConfigBuilder:
             persistent_keepalive:  保活间隔秒数 (默认 25)
 
         Returns:
-            [Peer] 段文本
+            [Peer] 段文本，如果缺少必要的 publicKey 则返回 None
         """
         pubkey = peer.get("publicKey", "")
+        if not pubkey:
+            return None
+
         endpoint = peer.get("endpoint", None)
         ip = peer.get("ip", "")
 
@@ -130,12 +133,11 @@ class WgConfigBuilder:
         )
         sections.append(iface)
 
-        # [Peer] x N
+        # [Peer] x N（跳过缺少 publicKey 的无效 peer）
         for peer_dict in network.peers:
-            sections.append("")
-            peer_section = WgConfigBuilder.build_peer_section(
-                peer=peer_dict,
-            )
-            sections.append(peer_section)
+            peer_section = WgConfigBuilder.build_peer_section(peer=peer_dict)
+            if peer_section:
+                sections.append("")
+                sections.append(peer_section)
 
         return "\n".join(sections)
