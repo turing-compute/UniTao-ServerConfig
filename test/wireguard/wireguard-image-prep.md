@@ -69,6 +69,7 @@ curl -s -X POST $HOST/api/v1/vms -H "Content-Type: application/json" -d '{
   "osVariant": "ubuntu24.04",
   "bridge": "ovs-br0",
   "useDHCP4": true,
+  "diskSizeGB": 20,
   "authType": "HostKey",
   "shareInventoryData": true,
   "prepareDomainImage": true

@@ -112,7 +112,7 @@ POST /api/v1/vms
 | gateway4 | string | 否 | 网关地址 |
 | shareInventoryData | bool | 否 | 注入 inventory_tool.py 和 report_network.py |
 | prepareDomainImage | bool | 否 | 注入 prep_image_for_commit.py |
-| diskSizeGB | int | 否 | 磁盘大小（GB） |
+| diskSizeGB | int | 否 | 磁盘大小（GB），默认 10 |
 
 ### Commit Image
 
