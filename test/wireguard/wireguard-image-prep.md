@@ -59,7 +59,7 @@ curl -s $HOST/api/v1/images/$IMAGE_NAME | python3 -c "import sys,json; print(jso
 ```bash
 HOST="http://<host_ip>:5000"
 
-# 创建 VM（用静态 IP 方便 SSH）
+# 创建 VM（DHCP + HostKey 认证）
 curl -s -X POST $HOST/api/v1/vms -H "Content-Type: application/json" -d '{
   "id": "wireguard-prep",
   "cpu": 2,
@@ -68,8 +68,8 @@ curl -s -X POST $HOST/api/v1/vms -H "Content-Type: application/json" -d '{
   "osImage": "wireguard26.04.01",
   "osVariant": "ubuntu24.04",
   "bridge": "ovs-br0",
-  "ipv4": "192.168.1.200/24",
-  "gateway4": "192.168.1.1",
+  "useDHCP4": true,
+  "authType": "HostKey",
   "shareInventoryData": true,
   "prepareDomainImage": true
 }'
@@ -86,18 +86,24 @@ curl -s $HOST/api/v1/vms/wireguard-prep/inventory | python3 -m json.tool
 
 ### 3. 部署 Agent
 
-用 `deploy.ps1`（PowerShell）或 `deploy.sh`（Git Bash）部署：
+先获取 VM 的 IP（DHCP 分配）：
+
+```bash
+curl -s $HOST/api/v1/vms/wireguard-prep/inventory/network-info.json | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['content']['data']['interfaces'][0]['ip'])"
+```
+
+然后用 `deploy.ps1`（PowerShell）或 `deploy.sh`（Git Bash）部署：
 
 **PowerShell:**
 ```powershell
 cd src/domain/wireguard
-.\deploy.ps1 192.168.1.200
+.\deploy.ps1 <vm_ip>
 ```
 
 **Git Bash:**
 ```bash
 cd src/domain/wireguard
-./deploy.sh 192.168.1.200
+./deploy.sh <vm_ip>
 ```
 
 部署脚本会自动：
@@ -110,7 +116,7 @@ cd src/domain/wireguard
 ### 4. 验证 Agent 工作正常
 
 ```bash
-ssh ubuntu@192.168.1.200
+ssh ubuntu@<vm_ip>
 
 # 检查服务
 sudo systemctl status wg-agent
@@ -140,7 +146,7 @@ curl -s -X POST $HOST/api/v1/vms/wireguard-prep/inventory \
 }'
 
 # 等 30s 后检查 wg0
-ssh ubuntu@192.168.1.200 "systemctl is-active wg-quick@wg0 && sudo wg show wg0"
+ssh ubuntu@<vm_ip> "systemctl is-active wg-quick@wg0 && sudo wg show wg0"
 ```
 
 ### 5. 运行 prep 清理
@@ -148,7 +154,7 @@ ssh ubuntu@192.168.1.200 "systemctl is-active wg-quick@wg0 && sudo wg show wg0"
 确认 Agent 工作正常后，运行两个 prep 脚本（prep 会自动 stop 服务）：
 
 ```bash
-ssh ubuntu@192.168.1.200
+ssh ubuntu@<vm_ip>
 
 # WireGuard 级清理（自动停止服务、删除密钥、wg0.conf、wireguard_network.json，保留 wg_agent.conf）
 sudo python3 /opt/unitao/domain/wireguard/prep_image_for_commit.py --force
