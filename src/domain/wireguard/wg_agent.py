@@ -336,7 +336,6 @@ class WgAgent:
                         network_cfg.save_to_file(self._network_config_path)
                         print(f"  Local config updated from inv.")
                         applied = False
-                        self._upload_config(network_cfg)
                     else:
                         print(f"  API timestamp changed but content unchanged.")
 
