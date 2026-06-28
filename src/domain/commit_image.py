@@ -12,9 +12,8 @@ Steps:
     1. Get VM IP from inventory
     2. SSH: run domain prep_image_for_commit.py --force
     3. SSH: run unitao-server-config prep_image_for_commit.py --force
-    4. SSH: shutdown -h now
-    5. Wait for VM to stop
-    6. Curl: stop VM, commit, delete VM
+    4. REST API: stop VM, wait for shutOff
+    5. REST API: commit, delete VM
 """
 import argparse
 import json
@@ -128,17 +127,13 @@ def main():
     if rc != 0:
         print(f"  WARNING: VM prep exited with code {rc}", file=sys.stderr)
 
-    # ── 4. Shutdown ──────────────────────────────────────────────────────
+    # ── 4. Stop VM via REST API ──────────────────────────────────────────
 
     print()
-    print("[4/5] Shutting down VM ...")
-    ssh("sudo", "shutdown", "-h", "now")
-    print("  Shutdown command sent.")
+    print("[4/5] Stopping VM ...")
+    api(f"/api/v1/vms/{vm_name}/stop", method="POST")
 
-    # ── 5. Wait for stop, commit, delete ─────────────────────────────────
-
-    print()
-    print("[5/5] Waiting for VM to stop ...")
+    # Wait for virsh state to go to shutOff / notExists
     for i in range(1, 31):
         time.sleep(5)
         vm_data = api(f"/api/v1/vms/{vm_name}")
@@ -148,9 +143,7 @@ def main():
             break
         print(".", end="", flush=True)
 
-    print()
-    print("  Stopping VM ...")
-    api(f"/api/v1/vms/{vm_name}/stop", method="POST")
+    # ── 5. Commit and delete ─────────────────────────────────────────────
 
     print("  Committing image ...")
     result = api(f"/api/v1/vms/{vm_name}/commit", method="POST", data={})
