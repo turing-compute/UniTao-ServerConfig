@@ -166,8 +166,20 @@ def main():
     # ── 5. Add key and deploy ────────────────────────────────────────────
 
     print()
-    print("[5/5] Adding host key and deploying ...")
+    print("[5/5] Starting ssh-agent and deploying ...")
+
+    # Start ssh-agent and add key (deploy.sh needs the key in the agent)
+    agent_out = subprocess.run(
+        ["ssh-agent", "-s"], capture_output=True, text=True, check=True
+    ).stdout
+    for line in agent_out.strip().split("\n"):
+        # Format: "SSH_AUTH_SOCK=/tmp/...; export SSH_AUTH_SOCK;"
+        if "=" in line and "export" in line:
+            kv = line.split(";")[0].strip()
+            k, v = kv.split("=", 1)
+            os.environ[k] = v
     subprocess.run(["ssh-add", key_path], check=True)
+    print("  Key added to ssh-agent.")
 
     deploy_dir = os.path.dirname(deploy_script)
     deploy_name = os.path.basename(deploy_script)
