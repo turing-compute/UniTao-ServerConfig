@@ -145,16 +145,12 @@ ssh ubuntu@192.168.1.200 "systemctl is-active wg-quick@wg0 && sudo wg show wg0"
 
 ### 5. 运行 prep 清理
 
-确认 Agent 工作正常后，stop 服务并运行两个 prep 脚本：
+确认 Agent 工作正常后，运行两个 prep 脚本（prep 会自动 stop 服务）：
 
 ```bash
 ssh ubuntu@192.168.1.200
 
-# 停止服务
-sudo systemctl stop wg-agent
-sudo systemctl stop wg-quick@wg0
-
-# WireGuard 级清理（删除密钥、wg0.conf、wireguard_network.json，保留 wg_agent.conf）
+# WireGuard 级清理（自动停止服务、删除密钥、wg0.conf、wireguard_network.json，保留 wg_agent.conf）
 sudo python3 /opt/unitao/domain/wireguard/prep_image_for_commit.py --force
 
 # VM 级清理（删除 SSH host keys、machine-id、cloud-init 状态等）

@@ -15,6 +15,7 @@ Usage:
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 
 WIREGUARD_DIR = "/etc/wireguard"
@@ -56,13 +57,22 @@ def main():
     else:
         print("=== WireGuard pre-commit cleanup ===\n")
 
-    # 1. WireGuard keys and generated config.
+    # 1. Stop services.
+    print("[1/3] Stopping services ...")
+    if not dry_run:
+        for svc in ("wg-agent", f"wg-quick@{NETWORK_NAME}"):
+            subprocess.run(["systemctl", "stop", svc], capture_output=True)
+            print(f"  stopped {svc}")
+    else:
+        print(f"  [dry-run] would stop wg-agent wg-quick@{NETWORK_NAME}")
+
+    # 2. WireGuard keys and generated config.
     # Only clean up if wireguard_network.json exists (agent was deployed).
     if os.path.isfile(NETWORK_CONFIG):
         wg_key_dir = os.path.join(WIREGUARD_DIR, NETWORK_NAME)
         wg_conf = os.path.join(WIREGUARD_DIR, f"{NETWORK_NAME}.conf")
 
-        print(f"[1/2] WireGuard keys and config (network: {NETWORK_NAME}):")
+        print(f"\n[2/3] WireGuard keys and config (network: {NETWORK_NAME}):")
         remove_path(wg_conf, dry_run)
         if os.path.isdir(wg_key_dir):
             for f in os.listdir(wg_key_dir):
@@ -74,11 +84,11 @@ def main():
         inv_path = os.path.join(AGENT_DIR, "wireguard_network_inv.json")
         remove_path(inv_path, dry_run)
     else:
-        print(f"[1/2] No {NETWORK_CONFIG} found, skipping WireGuard cleanup.")
+        print(f"\n[2/3] No {NETWORK_CONFIG} found, skipping WireGuard cleanup.")
 
-    # 2. Agent runtime state (generated conf, lock files, etc.).
+    # 3. Agent runtime state (generated conf, lock files, etc.).
     # Keep wg_agent.conf (install config) and *.json — those are part of the image.
-    print(f"\n[2/2] Agent runtime state:")
+    print(f"\n[3/3] Agent runtime state:")
     if os.path.isdir(AGENT_DIR):
         for f in os.listdir(AGENT_DIR):
             if f == "wg_agent.conf":
