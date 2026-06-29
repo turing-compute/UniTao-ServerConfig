@@ -188,25 +188,39 @@ class WgAgent:
 
         recv = sent = 0
         try:
+            # Prefer `wg show <iface> transfer` (2 integers).
             r = subprocess.run(
                 ["wg", "show", self._network, "transfer"],
                 capture_output=True, text=True,
             )
-            if r.returncode == 0:
+            if r.returncode == 0 and r.stdout.strip():
                 parts = r.stdout.strip().split()
-                if len(parts) >= 2:
-                    recv = parts[0]
-                    sent = parts[1]
-                elif len(parts) >= 4:
-                    recv = f"{parts[0]} {parts[1]}"
-                    sent = f"{parts[2]} {parts[3]}"
+                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                    recv = int(parts[0])
+                    sent = int(parts[1])
         except FileNotFoundError:
             pass
 
+        # Fallback: sum per-peer transfer from `wg show <iface> dump`.
+        if recv == 0 and sent == 0:
+            try:
+                r = subprocess.run(
+                    ["wg", "show", self._network, "dump"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    for line in r.stdout.strip().split("\n"):
+                        fields = line.split("\t")
+                        if len(fields) >= 8 and fields[5].isdigit() and fields[6].isdigit():
+                            recv += int(fields[5])
+                            sent += int(fields[6])
+            except FileNotFoundError:
+                pass
+
         return [
             {"key": "state", "value": "up"},
-            {"key": "recv_bytes", "value": str(recv) if recv else "0"},
-            {"key": "sent_bytes", "value": str(sent) if sent else "0"},
+            {"key": "recv_bytes", "value": str(recv)},
+            {"key": "sent_bytes", "value": str(sent)},
         ]
 
     def _report_status(self):
