@@ -369,6 +369,26 @@ class WgAgent:
             pass
         return self._wg_quick_up()
 
+    def _wg_quick_down(self) -> bool:
+        """Bring down the WireGuard interface via systemctl."""
+        if not self._key_manager.interface_exists(self._network):
+            print(f"  Interface [{self._network}] already down.")
+            return True
+        try:
+            result = subprocess.run(
+                ["systemctl", "stop", f"wg-quick@{self._network}"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"  [ERROR] wg-quick down failed: {result.stderr.strip()}",
+                      file=sys.stderr)
+                return False
+            print(f"  Interface [{self._network}] is down (switch=off).")
+            return True
+        except FileNotFoundError:
+            print(f"  [ERROR] systemctl not found.", file=sys.stderr)
+            return False
+
     # -- main loop ----------------------------------------------------------
 
     def run(self, poll_interval: int = DEFAULT_POLL_INTERVAL):
@@ -429,18 +449,24 @@ class WgAgent:
                     else:
                         print(f"  API timestamp changed but content unchanged.")
 
-                if network_cfg.has_network_config:
-                    if not applied:
-                        print(f"  Applying config ...")
-                        if self.apply_config(network_cfg, private_key):
-                            applied = True
-                        else:
-                            print(f"  [WARN] Failed to apply config, will retry.",
-                                  file=sys.stderr)
+            # Handle orchestrator switch control.
+            if network_cfg.is_switched_off:
+                if self._key_manager.interface_exists(self._network):
+                    print(f"  Switch is off, bringing interface down ...")
+                    self._wg_quick_down()
+                applied = False
+            elif network_cfg.has_network_config:
+                if not applied:
+                    print(f"  Applying config ...")
+                    if self.apply_config(network_cfg, private_key):
+                        applied = True
                     else:
-                        print(f"  Config unchanged, interface already up.")
+                        print(f"  [WARN] Failed to apply config, will retry.",
+                              file=sys.stderr)
                 else:
-                    print(f"  Waiting for assigned_ip ...")
+                    print(f"  Config unchanged, interface already up.")
+            else:
+                print(f"  Waiting for assigned_ip ...")
 
             self._report_status()
             time.sleep(poll_interval)

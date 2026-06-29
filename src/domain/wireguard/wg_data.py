@@ -188,6 +188,7 @@ class WgNetworkConfig:
         DATA_NETWORK_PEERS         = "peers"
         DATA_NETWORK_POST_UP      = "post_up"
         DATA_NETWORK_POST_DOWN    = "post_down"
+        DATA_NETWORK_SWITCH       = "switch"
 
     class PeerKey:
         PUBLIC_KEY = "publicKey"
@@ -333,6 +334,13 @@ class WgNetworkConfig:
                             f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_POST_DOWN}][{i}] must be a string"
                         )
 
+        # --- data.network.switch: 可选, "on" | "off" ---
+        sw = net.get(K.DATA_NETWORK_SWITCH, None)
+        if sw is not None and sw not in ("on", "off"):
+            raise ValueError(
+                f"WgNetworkConfig: [{K.DATA}.{K.DATA_NETWORK}.{K.DATA_NETWORK_SWITCH}] must be 'on' or 'off', got [{sw}]"
+            )
+
     # ── 属性访问器 ──────────────────────────────────────────────────────
 
     @property
@@ -383,8 +391,18 @@ class WgNetworkConfig:
         return val if isinstance(val, list) else [val]
 
     @property
+    def switch(self) -> str:
+        """开关状态，Orchestrator 控制。默认 "on" 保持向后兼容。"""
+        net = self._ensure_network()
+        return net.get(self.Key.DATA_NETWORK_SWITCH, "on")
+
+    @property
+    def is_switched_off(self) -> bool:
+        return self.switch == "off"
+
+    @property
     def has_network_config(self) -> bool:
-        """assigned_ip 非空即可生成 wg.conf。"""
+        """assigned_ip 非空且 switch 非 off 即可生成 wg.conf。"""
         aip = self.assigned_ip
         return aip is not None and aip != ""
 
@@ -452,6 +470,7 @@ class WgNetworkConfig:
             self.Key.DATA_NETWORK_PEERS,
             self.Key.DATA_NETWORK_POST_UP,
             self.Key.DATA_NETWORK_POST_DOWN,
+            self.Key.DATA_NETWORK_SWITCH,
         ):
             if key in net:
                 local_net[key] = net[key]
