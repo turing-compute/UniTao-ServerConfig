@@ -17,7 +17,7 @@ DOMAIN=""
 VM_NAME=""
 DOMAIN_PREP="/opt/unitao/domain/{domain}/prep_image_for_commit.py"
 VM_PREP="/opt/unitao-server-config/prep_image_for_commit.py"
-SLEEP_TIME=10
+SLEEP_TIME=20
 
 usage() {
     echo "Usage: $0 -d <domain> -v <vm_name> [-k <ssh_key>] [-u <user>]"
