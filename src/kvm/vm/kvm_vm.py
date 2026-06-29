@@ -265,39 +265,22 @@ class KvmVm:
                ""
             ])
         # Determine authentication type.
-        # Host key is always injected when available for SSH access.
-        # authType controls additional authentication (password, etc).
+        # authType explicitly declares how the VM authenticates.
+        # When authType is not declared, no keys or passwords are configured.
         auth_type = self._auth_type
         km = self._get_key_manager()
-
-        # Always inject host key for SSH if available.
-        if km is not None:
-            host_pubkey = km.get_public_key_openssh()
-            user_data.extend([
-                "# Inject Host public key for key-based SSH access",
-                "ssh_authorized_keys:",
-                f"  - {host_pubkey}",
-                ""
-            ])
-            self.log.info("Host SSH public key injected into cloud-init user-data")
 
         if auth_type == self.Keyword.AuthTypes.CustomerPWD:
             self._apply_customer_pwd(user_data)
         elif auth_type == self.Keyword.AuthTypes.RandomPWD:
             self._apply_random_pwd(user_data)
         elif auth_type == self.Keyword.AuthTypes.HostKey:
-            self._apply_host_key(user_data, km)  # ssh_pwauth: false
+            self._apply_host_key(user_data, km)
         elif auth_type == self.Keyword.AuthTypes.CustomerKey:
             self._apply_customer_keys(user_data)
         elif auth_type == self.Keyword.AuthTypes.NoAuth:
             self._apply_no_auth(user_data)
-        else:
-            # Default: disable password auth (host key only).
-            user_data.extend([
-                "# Disable password authentication",
-                "ssh_pwauth: false",
-                ""
-            ])
+        # else: no authType declared — do nothing, no keys or passwords injected.
 
         # Collect write_files and runcmd entries for cloud-init.
         write_files = []
@@ -350,11 +333,21 @@ class KvmVm:
         self.log.info("Random password generated and injected into cloud-init user-data")
 
     def _apply_host_key(self, user_data: list, km):
-        # Host key already injected above; just ensure password auth is disabled.
+        if km is not None:
+            host_pubkey = km.get_public_key_openssh()
+            user_data.extend([
+                "# Inject Host public key for key-based SSH access",
+                "ssh_authorized_keys:",
+                f"  - {host_pubkey}",
+                "",
+            ])
+            self.log.info("Host SSH public key injected into cloud-init user-data")
+        else:
+            self.log.warning("HostKey authType requested but host key pair is not available")
         user_data.extend([
             "# Disable password authentication",
             "ssh_pwauth: false",
-            ""
+            "",
         ])
         self.VmData[self.Keyword.Login] = "host_key"
         self.log.info("HostKey: password authentication disabled")
