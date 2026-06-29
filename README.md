@@ -67,7 +67,16 @@ VM 之间组建 WireGuard VPN 网络。Host 是纯数据平台，不包含 WireG
 - **`generate_keys.py`** — 部署时密钥对生成脚本
 - **`inventory_tool.py`** — VM 侧工具，与 Host REST API 交换数据（stdlib only）
 
-VM 认证方式：`CustomerPWD` | `RandomPWD` | `HostKey` | `CustomerKey` | `NoAuth`
+VM 认证方式（`POST /api/v1/vms` 时通过 `authType` 字段声明）：
+
+| authType | 密码 | SSH 密钥 | 说明 |
+|----------|:---:|:---:|------|
+| `CustomerPWD` | 客户指定 | — | 客户提供明文密码，密码登录 |
+| `RandomPWD` | 随机生成 | — | 自动生成密码学安全随机密码 |
+| `HostKey` | 无 | Host 公钥 | Host RSA 密钥对免密登录，关闭密码 |
+| `CustomerKey` | 无 | 客户公钥 | 客户提供 SSH 公钥列表 |
+| `NoAuth` | 无 | 无 | 无认证，全自动 VM |
+| 未声明 | 无 | 无 | 不做任何密码/密钥设置 |
 
 [详细设计文档](plan/vm-secure-access/plan.md)
 
