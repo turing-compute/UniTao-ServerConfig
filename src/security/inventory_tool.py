@@ -44,7 +44,7 @@ def post_data(data_path: str, host_api_url: str, vm_id: str):
     url = f"{host_api_url}/api/v1/vms/{vm_id}/inventory"
 
     cmd = [
-        "curl", "-s", "-X", "POST", url,
+        "curl", "-sS", "-X", "POST", url,
         "-H", "Content-Type: application/json",
         "-d", f"@{data_path}",
     ]
@@ -59,7 +59,7 @@ def post_data(data_path: str, host_api_url: str, vm_id: str):
 def get_inventory_list(host_api_url: str, vm_id: str) -> list:
     """GET the list of inventory file names from the host."""
     url = f"{host_api_url}/api/v1/vms/{vm_id}/inventory"
-    cmd = ["curl", "-s", url]
+    cmd = ["curl", "-sS", url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"ERROR: curl failed: {result.stderr}", file=sys.stderr)
@@ -81,7 +81,7 @@ def get_inventory_file(host_api_url: str, vm_id: str, filename: str) -> dict:
     Returns {"content": ..., "timestamp": "..."}
     """
     url = f"{host_api_url}/api/v1/vms/{vm_id}/inventory/{filename}"
-    cmd = ["curl", "-s", url]
+    cmd = ["curl", "-sS", url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"ERROR: curl failed: {result.stderr}", file=sys.stderr)

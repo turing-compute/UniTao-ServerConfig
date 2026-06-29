@@ -47,6 +47,8 @@ sudo ./service/deploy-service.sh /etc/unitiao
 
 ### 创建 Image
 
+**基于已有镜像（`"local"`）：**
+
 ```json
 POST /api/v1/images/<name>
 {
@@ -57,12 +59,29 @@ POST /api/v1/images/<name>
 }
 ```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| imageFormat | string | 镜像格式，通常 `qcow2` |
-| imageSource | string | `"local"` 基于已有镜像；`"remote"` 从 downloadLink 下载 |
-| baseImagePath | string | 基镜像路径（相对于 `/opt/kvm/images/`） |
-| baseImageFormat | string | 基镜像格式 |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| imageFormat | string | 是 | 镜像格式，通常 `qcow2` |
+| imageSource | string | 是 | `"local"` |
+| baseImagePath | string | 是 | 基镜像路径（相对于 `/opt/kvm/images/`） |
+| baseImageFormat | string | 是 | 基镜像格式 |
+
+**从远程下载（`"remote"`）：**
+
+```json
+POST /api/v1/images/<name>
+{
+  "imageFormat": "qcow2",
+  "imageSource": "remote",
+  "downloadLink": "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| imageFormat | string | 是 | 镜像格式（`qcow2` 或 `raw`） |
+| imageSource | string | 是 | `"remote"` |
+| downloadLink | string | 是 | 远程镜像下载 URL |
 
 等待 `downloadState` 变为 `"ready"` 后即可在 VM 创建时引用。
 
