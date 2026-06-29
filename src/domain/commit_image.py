@@ -25,7 +25,7 @@ import urllib.request
 import urllib.error
 
 HOST = "http://localhost:5000"
-SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+SSH_OPTS = ["-t", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
             "-o", "ConnectTimeout=10"]
 SSH_USER = "ubuntu"
 SSH_KEY = None  # set from --key argument

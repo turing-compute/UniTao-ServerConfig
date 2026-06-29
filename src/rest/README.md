@@ -113,6 +113,22 @@ POST /api/v1/vms
 | shareInventoryData | bool | 否 | 注入 inventory_tool.py 和 report_network.py |
 | prepareDomainImage | bool | 否 | 注入 prep_image_for_commit.py |
 | diskSizeGB | int | 否 | 磁盘大小（GB），默认 10 |
+| authType | string | 否 | 认证方式，见下方 [VM 认证方式](#vm-认证方式) |
+| customerPWD | string | 否 | authType=CustomerPWD 时必填，明文密码 |
+| customerKeys | list[string] | 否 | authType=CustomerKey 时必填，SSH 公钥列表 |
+
+### VM 认证方式
+
+通过 `authType` 字段控制 cloud-init 注入的认证策略：
+
+| authType | 密码 | SSH 密钥 | ssh_pwauth | 说明 |
+|----------|:---:|:---:|:---:|------|
+| `CustomerPWD` | 客户指定 | — | true | 明文密码登录 |
+| `RandomPWD` | 随机生成 | — | true | 自动生成安全随机密码 |
+| `HostKey` | 无 | Host 公钥 | false | Host RSA 密钥对免密登录 |
+| `CustomerKey` | 无 | 客户公钥 | false | 客户提供 SSH 公钥列表 |
+| `NoAuth` | 无 | 无 | false | 无认证，全自动 VM |
+| 未声明 | 无 | 无 | 不设置 | 不做任何密码/密钥设置 |
 
 ### Commit Image
 
@@ -190,10 +206,10 @@ Peer 字段说明：
 | `disabled` | bool | 否 | `true` 跳过该 peer |
 | `id` | string/int | 否 | 内部标识符 |
 
-Agent 每轮 poll 会上报 `data.status` 到 `wireguard_network.json`：
+Agent 每轮 poll 会上报 status 到独立文件 `wireguard_network_status.json`：
 
 ```json
-[{"key": "state", "value": "up"}, {"key": "recv_bytes", "value": "1234"}, {"key": "sent_bytes", "value": "5678"}]
+{"status": [{"key": "state", "value": "up"}, {"key": "recv_bytes", "value": "1234"}, {"key": "sent_bytes", "value": "5678"}]}
 ```
 
 ### 获取文件
