@@ -31,12 +31,12 @@
 HOST="http://<host_ip>:5000"
 IMAGE_NAME="wireguard26.04.01"
 
-# 创建 image（基于 ubuntu-26.04 base）
+# 创建 image（基于 ubuntu26.04 base）
 curl -s -X POST $HOST/api/v1/images/$IMAGE_NAME \
   -H "Content-Type: application/json" -d '{
     "imageFormat": "qcow2",
     "imageSource": "local",
-    "baseImagePath": "../ubuntu-26.04.qcow2",
+    "baseImagePath": "../ubuntu26.04.qcow2",
     "baseImageFormat": "qcow2"
   }'
 
