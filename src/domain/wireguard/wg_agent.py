@@ -39,6 +39,7 @@ DEFAULT_POLL_INTERVAL = 30
 
 # Inventory filenames
 INVENTORY_CONFIG_NAME = "wireguard_network"
+INVENTORY_STATUS_NAME = "wireguard_network_status"
 INVENTORY_INV_FILENAME = "wireguard_network_inv.json"
 
 
@@ -126,10 +127,10 @@ class WgAgent:
         except json.JSONDecodeError:
             return None, None
 
-    def _inventory_post(self, data: dict) -> bool:
+    def _inventory_post(self, data: dict, name: str = None) -> bool:
         """POST data to inventory. `name` is added only for the API call."""
         payload = dict(data)
-        payload["name"] = INVENTORY_CONFIG_NAME
+        payload["name"] = name if name else INVENTORY_CONFIG_NAME
         tmp = None
         try:
             tmp = tempfile.NamedTemporaryFile(
@@ -209,12 +210,14 @@ class WgAgent:
         ]
 
     def _report_status(self):
-        """PATCH status to inventory."""
+        """POST status to inventory as a separate file."""
         status = self._collect_status()
-        self._inventory_patch(
-            f"{INVENTORY_CONFIG_NAME}.json",
-            {"data": {"status": status}},
+        ok = self._inventory_post(
+            {"status": status},
+            name=INVENTORY_STATUS_NAME,
         )
+        if not ok:
+            print(f"  [WARN] Failed to report status.", file=sys.stderr)
 
     # -- Step 2: local config management ------------------------------------
 
