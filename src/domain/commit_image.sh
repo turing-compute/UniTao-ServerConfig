@@ -17,6 +17,7 @@ DOMAIN=""
 VM_NAME=""
 DOMAIN_PREP="/opt/unitao/domain/{domain}/prep_image_for_commit.py"
 VM_PREP="/opt/unitao-server-config/prep_image_for_commit.py"
+SLEEP_TIME=10
 
 usage() {
     echo "Usage: $0 -d <domain> -v <vm_name> [-k <ssh_key>] [-u <user>]"
@@ -80,14 +81,14 @@ $SSH_CMD ${SSH_USER}@${VM_IP} sudo python3 "$DOMAIN_PREP_PATH" --force || true
 
 # ── 3. Run VM-level prep ─────────────────────────────────────────────
 
-echo "sleep 2"
-sleep 2
+echo "sleep $SLEEP_TIME"
+sleep $SLEEP_TIME
 echo "[3/5] Running VM prep ..."
 $SSH_CMD ${SSH_USER}@${VM_IP} sudo python3 "$VM_PREP" --force || true
 
 # ── 4. Stop VM via REST API ──────────────────────────────────────────
-echo "sleep 2"
-sleep 2
+echo "sleep $SLEEP_TIME"
+sleep $SLEEP_TIME
 echo "[4/5] Stopping VM ..."
 curl -s -X POST "$HOST/api/v1/vms/$VM_NAME/stop" -H "Content-Type: application/json" > /dev/null
 
@@ -105,14 +106,14 @@ done
 echo ""
 
 # ── 5. Commit and delete ─────────────────────────────────────────────
-echo "sleep 2"
-sleep 2
+echo "sleep $SLEEP_TIME"
+sleep $SLEEP_TIME
 echo "  Committing image ..."
 curl -s -X POST "$HOST/api/v1/vms/$VM_NAME/commit" -H "Content-Type: application/json" \
     -d '{}' | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('message',''))"
 
-echo "sleep 2"
-sleep 2
+echo "sleep $SLEEP_TIME"
+sleep $SLEEP_TIME
 echo "  Deleting VM '$VM_NAME' ..."
 curl -s -X DELETE "$HOST/api/v1/vms/$VM_NAME" > /dev/null
 echo "  Deleted."
