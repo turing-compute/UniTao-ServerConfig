@@ -80,14 +80,14 @@ $SSH_CMD ${SSH_USER}@${VM_IP} sudo python3 "$DOMAIN_PREP_PATH" --force || true
 
 # ── 3. Run VM-level prep ─────────────────────────────────────────────
 
-echo ""
+echo "sleep 2"
+sleep 2
 echo "[3/5] Running VM prep ..."
 $SSH_CMD ${SSH_USER}@${VM_IP} sudo python3 "$VM_PREP" --force || true
 
 # ── 4. Stop VM via REST API ──────────────────────────────────────────
 echo "sleep 2"
 sleep 2
-echo ""
 echo "[4/5] Stopping VM ..."
 curl -s -X POST "$HOST/api/v1/vms/$VM_NAME/stop" -H "Content-Type: application/json" > /dev/null
 
@@ -111,6 +111,7 @@ echo "  Committing image ..."
 curl -s -X POST "$HOST/api/v1/vms/$VM_NAME/commit" -H "Content-Type: application/json" \
     -d '{}' | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('message',''))"
 
+echo "sleep 2"
 sleep 2
 echo "  Deleting VM '$VM_NAME' ..."
 curl -s -X DELETE "$HOST/api/v1/vms/$VM_NAME" > /dev/null
