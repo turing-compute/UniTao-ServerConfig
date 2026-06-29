@@ -139,17 +139,14 @@ def clean_cloud_init(dry_run: bool = False):
 
 
 def clean_network_config(dry_run: bool = False):
-    """Remove cloud-init injected netplan files.
-    Keep the base 00-installer-config.yaml or 01-netcfg.yaml for reference,
-    but remove any MAC-address-specific config.
+    """Remove only cloud-init generated netplan file.
+    Preserves base system netplan config so network works on next boot
+    before cloud-init regenerates 50-cloud-init.yaml.
     """
     if not os.path.isdir(NETPLAN_DIR):
         return
-    for f in os.listdir(NETPLAN_DIR):
-        if not f.endswith(".yaml"):
-            continue
-        path = os.path.join(NETPLAN_DIR, f)
-        remove_path(path, dry_run)
+    cloud_init_netplan = os.path.join(NETPLAN_DIR, "50-cloud-init.yaml")
+    remove_path(cloud_init_netplan, dry_run)
 
 
 def clean_misc(dry_run: bool = False):
