@@ -77,7 +77,8 @@ class KvmVm:
 
     def __init__(self, logger: logging.Logger, data_path: str = None, key_dir: str = "/opt/unitiao/keys",
                  auth_type: str = None, customer_pwd: str = None, customer_keys: list = None,
-                 share_inventory_data: bool = False, host_api_url: str = None):
+                 share_inventory_data: bool = False, host_api_url: str = None,
+                 prepare_domain_image: bool = False):
         self.log = logger
         if data_path is None:
             args = KvmVm.parse_args()
@@ -90,12 +91,13 @@ class KvmVm:
         self.Disks: list[KvmImage] = []
         self.Networks: list[KvmNetwork] = []
         self.KeyDir = key_dir
-        self._auth_type = auth_type
-        self._customer_pwd = customer_pwd
-        self._customer_keys = customer_keys
+        self._auth_type = auth_type or self.VmData.get("authType", None)
+        self._customer_pwd = customer_pwd or self.VmData.get("customerPWD", None)
+        self._customer_keys = customer_keys or self.VmData.get("customerKeys", None)
         # Fall back to VmData for inventory settings (persisted from previous run).
         self._share_inventory_data = share_inventory_data or self.VmData.get("shareInventoryData", False)
         self._host_api_url = host_api_url or self.VmData.get("hostApiUrl", None)
+        self._prepare_domain_image = prepare_domain_image or self.VmData.get("prepareDomainImage", False)
         self._key_manager = None
         self.Validate()
 
@@ -263,7 +265,8 @@ class KvmVm:
                ""
             ])
         # Determine authentication type.
-        # Default (no authType): host key if available, else random password.
+        # authType explicitly declares how the VM authenticates.
+        # When authType is not declared, no keys or passwords are configured.
         auth_type = self._auth_type
         km = self._get_key_manager()
 
@@ -277,15 +280,25 @@ class KvmVm:
             self._apply_customer_keys(user_data)
         elif auth_type == self.Keyword.AuthTypes.NoAuth:
             self._apply_no_auth(user_data)
-        else:
-            # Default: host key if available, else random password.
-            if km is not None:
-                self._apply_host_key(user_data, km)
-            else:
-                self._apply_random_pwd(user_data)
+        # else: no authType declared — do nothing, no keys or passwords injected.
+
+        # Collect write_files and runcmd entries for cloud-init.
+        write_files = []
+        run_commands = []
 
         # Inject inventory config for VM-to-host data sharing.
-        self._apply_inventory_data(user_data)
+        self._apply_inventory_data(user_data, write_files, run_commands)
+
+        # Inject domain image preparation script.
+        self._apply_prep_image_data(user_data, write_files, run_commands)
+
+        # Output merged write_files and runcmd.
+        if write_files:
+            user_data.append("write_files:")
+            user_data.extend(write_files)
+        if run_commands:
+            user_data.append("runcmd:")
+            user_data.extend(run_commands)
 
         Util.write_file(user_data_path, "w", user_data)
         # Write VM data JSON back with login attribute.
@@ -326,15 +339,18 @@ class KvmVm:
                 "# Inject Host public key for key-based SSH access",
                 "ssh_authorized_keys:",
                 f"  - {host_pubkey}",
-                "# Disable password authentication",
-                "ssh_pwauth: false",
-                ""
+                "",
             ])
-            self.VmData[self.Keyword.Login] = "host_key"
             self.log.info("Host SSH public key injected into cloud-init user-data")
         else:
-            self.log.warning("HostKey authType requested but host key not available, falling back to random password")
-            self._apply_random_pwd(user_data)
+            self.log.warning("HostKey authType requested but host key pair is not available")
+        user_data.extend([
+            "# Disable password authentication",
+            "ssh_pwauth: false",
+            "",
+        ])
+        self.VmData[self.Keyword.Login] = "host_key"
+        self.log.info("HostKey: password authentication disabled")
 
     def _apply_customer_keys(self, user_data: list):
         keys = self._customer_keys or []
@@ -363,7 +379,7 @@ class KvmVm:
         self.VmData[self.Keyword.Login] = "none"
         self.log.info("NoAuth: no password or SSH keys injected into cloud-init user-data")
 
-    def _apply_inventory_data(self, user_data: list):
+    def _apply_inventory_data(self, user_data: list, write_files: list, run_commands: list):
         if not self._share_inventory_data:
             return
         if not self._host_api_url:
@@ -373,17 +389,34 @@ class KvmVm:
             "hostApiUrl": self._host_api_url,
             "vmId": self.VmName,
         })
-        # Read inventory_tool.py for injection into VM.
+        # Read inventory_tool.py and report_network.py for injection.
         import base64
-        tool_src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                                "security", "inventory_tool.py")
+        src_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        tool_src = os.path.join(src_root, "security", "inventory_tool.py")
+        report_src = os.path.join(src_root, "service", "report_network.py")
         with open(tool_src, "rb") as f:
             tool_b64 = base64.b64encode(f.read()).decode()
-        user_data.extend([
-            "# Inject inventory config for VM-to-host data sharing",
-            "runcmd:",
+        with open(report_src, "rb") as f:
+            report_b64 = base64.b64encode(f.read()).decode()
+        report_network_service_lines = [
+            "[Unit]",
+            "Description=Report VM network config to host inventory",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "ExecStart=/usr/bin/python3 /opt/unitao-server-config/report_network.py",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+        ]
+        run_commands.extend([
             "  - mkdir -p /opt/unitao-server-config",
-            "write_files:",
+            "  - systemctl enable report-network.service",
+            "  - systemctl start report-network.service",
+        ])
+        write_files.extend([
             "  - path: /opt/unitao-server-config/inventory.json",
             "    permissions: '0644'",
             f"    content: '{inventory_config}'",
@@ -391,12 +424,36 @@ class KvmVm:
             "    permissions: '0755'",
             "    encoding: b64",
             f"    content: {tool_b64}",
-            ""
+            "  - path: /opt/unitao-server-config/report_network.py",
+            "    permissions: '0755'",
+            "    encoding: b64",
+            f"    content: {report_b64}",
+            "  - path: /etc/systemd/system/report-network.service",
+            "    permissions: '0644'",
+            f"    content: {json.dumps('\n'.join(report_network_service_lines) + '\n')}",
         ])
         # Persist inventory settings so subsequent calls (PATCH/start/stop) can restore them.
         self.VmData["shareInventoryData"] = True
         self.VmData["hostApiUrl"] = self._host_api_url
         self.log.info("Inventory config (write_files + runcmd) injected into cloud-init user-data")
+
+    def _apply_prep_image_data(self, user_data: list, write_files: list, run_commands: list):
+        """Inject prep_image_for_commit.py for domain image preparation."""
+        if not self._prepare_domain_image:
+            return
+        import base64
+        prep_src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                "kvm", "image", "prep_image_for_commit.py")
+        with open(prep_src, "rb") as f:
+            prep_b64 = base64.b64encode(f.read()).decode()
+        write_files.extend([
+            "  - path: /opt/unitao-server-config/prep_image_for_commit.py",
+            "    permissions: '0755'",
+            "    encoding: b64",
+            f"    content: {prep_b64}",
+        ])
+        self.VmData["prepareDomainImage"] = True
+        self.log.info("prep_image_for_commit.py injected into cloud-init user-data")
 
     def create_ci_meta_data(self):
         meta_data_path = os.path.join(self.VmData[self.Keyword.VmPath], "meta-data.yaml")
@@ -674,6 +731,10 @@ class KvmNetwork:
                     f"        - 8.8.4.4"
                 ])
                 network_config.extend(route_config)
+        # Disable IPv6 DHCP and link-local to prevent systemd-networkd
+        # from entering a failed state when no DHCPv6 server is available.
+        network_config.append("    dhcp6: false")
+        network_config.append("    link-local: []")
         return network_config
 
 

@@ -190,6 +190,25 @@ def _create_image(id: str, data: dict):
     """
     logger = _get_logger()
 
+    # If imageSource is "local", verify baseImagePath exists.
+    if data.get("imageSource") == "local":
+        base = data.get("baseImagePath", "")
+        if base:
+            base_abs = os.path.normpath(os.path.join(
+                get_data_dir(current_app, "image"), base))
+            if not os.path.isfile(base_abs):
+                return jsonify({
+                    "success": False,
+                    "error": {"code": "VALIDATION_ERROR",
+                              "message": f"baseImagePath does not exist: {base}"}
+                }), 400
+        else:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": "imageSource 'local' requires 'baseImagePath'"}
+            }), 400
+
     # If imagePath is not specified, auto-generate relative to imageDataDir.
     if "imagePath" not in data:
         image_format = data.get("imageFormat", "qcow2")

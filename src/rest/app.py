@@ -11,6 +11,7 @@ from shared.logger import Log
 from rest.api_vm import vm_bp
 from rest.api_image import image_bp, recover_stale_images
 from rest.api_bridge import bridge_bp
+from rest.api_schema import schema_bp
 from rest.api_utils import utils_bp
 
 # Config keys that are directory paths and should be resolved to absolute paths.
@@ -30,8 +31,10 @@ def load_config(config_path: str = None) -> dict:
     config_dir = os.path.dirname(os.path.abspath(config_path))
     for key in _DIR_KEYS:
         value = config.get(key, None)
-        if value is not None and not os.path.isabs(value):
-            config[key] = os.path.abspath(os.path.join(config_dir, value))
+        if value is not None:
+            if not os.path.isabs(value):
+                value = os.path.join(config_dir, value)
+            config[key] = os.path.normpath(value)
 
     return config
 
@@ -96,20 +99,15 @@ def create_app(config: dict = None) -> Flask:
 
     @app.route("/")
     def root():
-        endpoints = {}
-        for rule in app.url_map.iter_rules():
-            if rule.endpoint == "root":
-                continue
-            methods = sorted([m for m in rule.methods if m not in ("HEAD", "OPTIONS")])
-            endpoints[rule.endpoint] = f"{'|'.join(methods)} {rule.rule}"
         return jsonify({
             "success": True,
             "data": {
                 "service": "UniTao KVM Host",
-                "endpoints": endpoints
+                "docs": "/api/v1"
             }
         })
 
+    app.register_blueprint(schema_bp, url_prefix="/api/v1")
     app.register_blueprint(vm_bp, url_prefix="/api/v1/vms")
     app.register_blueprint(image_bp, url_prefix="/api/v1/images")
     app.register_blueprint(bridge_bp, url_prefix="/api/v1/bridges")

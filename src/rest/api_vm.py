@@ -130,6 +130,12 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "osType": "linux",
         "osVariant": os_variant,
     }
+    if auth_type:
+        vm_json["authType"] = auth_type
+    if customer_pwd:
+        vm_json["customerPWD"] = customer_pwd
+    if customer_keys:
+        vm_json["customerKeys"] = customer_keys
     return vm_json
 
 
@@ -194,12 +200,12 @@ def create_vm():
     vm_host_name = data.get("vmHostName", None)
     os_image = data.get("osImage", None)
     os_variant = data.get("osVariant", None)
-    bridge_name = data.get("bridge", None)
+    bridge_name = data.get("bridge", None) or _get_config().get("defaultBridge", None)
 
     required = [
         ("id", vm_id), ("cpu", cpu), ("ramInGB", ram_gb),
         ("vmHostName", vm_host_name), ("osImage", os_image),
-        ("osVariant", os_variant), ("bridge", bridge_name),
+        ("osVariant", os_variant),
     ]
     for field_name, field_val in required:
         if field_val is None:
@@ -209,6 +215,13 @@ def create_vm():
                           "message": f"Missing required field '{field_name}'"}
             }), 400
 
+    if not bridge_name:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "No bridge specified and no defaultBridge in config"}
+        }), 400
+
     # ── Optional fields ──
     ipv4 = data.get("ipv4", None)          # static IP in CIDR notation
     gateway4 = data.get("gateway4", None)  # gateway for static IP
@@ -217,6 +230,7 @@ def create_vm():
     customer_pwd = data.get("customerPWD", None)
     customer_keys = data.get("customerKeys", None)
     share_inv = data.get("shareInventoryData", False)
+    prepare_domain_image = data.get("prepareDomainImage", False)
 
     # ── Validate authType ──
     if auth_type is not None:
@@ -249,6 +263,15 @@ def create_vm():
             "error": {"code": "VALIDATION_ERROR",
                       "message": "'shareInventoryData' must be a boolean"}
         }), 400
+
+    # ── Validate prepareDomainImage ──
+    if not isinstance(prepare_domain_image, bool):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "'prepareDomainImage' must be a boolean"}
+        }), 400
+
     host_api_url = _get_config().get("hostApiUrl", None)
 
     # ── Validate diskSizeGB type ──
@@ -335,7 +358,8 @@ def create_vm():
     vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir(),
                auth_type=auth_type, customer_pwd=customer_pwd,
                customer_keys=customer_keys,
-               share_inventory_data=share_inv, host_api_url=host_api_url)
+               share_inventory_data=share_inv, host_api_url=host_api_url,
+               prepare_domain_image=prepare_domain_image)
     vm.Process()
 
     status_code = 200 if already_exists else 201
@@ -349,10 +373,17 @@ def create_vm():
 def get_vm(name: str):
     vm_def = read_entity_data(current_app, "vm", name)
     if vm_def is None:
+        # Check if the VM exists in virsh (unmanaged).
+        virsh_state = _get_virsh_state(name)
+        if virsh_state == KvmVm.Keyword.VmStates.NotExists:
+            return jsonify({
+                "success": False,
+                "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+            }), 404
         return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
-        }), 404
+            "success": True,
+            "data": {"name": name, "virshState": virsh_state, "managed": False}
+        })
 
     # Load all JSON files from the VM's data directory.
     data_dir = vm_data_dir(current_app, name)
@@ -368,11 +399,14 @@ def get_vm(name: str):
     inventory = {}
     inv_dir = os.path.join(data_dir, "inventory")
     if os.path.isdir(inv_dir):
+        from datetime import datetime, timezone as tz
         for f in sorted(os.listdir(inv_dir)):
             if f.endswith(".json"):
                 file_path = os.path.join(inv_dir, f)
+                mtime = os.path.getmtime(file_path)
+                ts = datetime.fromtimestamp(mtime, tz=tz.utc).isoformat()
                 with open(file_path, "r") as fh:
-                    inventory[f] = json.load(fh)
+                    inventory[f] = {"data": json.load(fh), "timestamp": ts}
 
     virsh_state = _get_virsh_state(name)
     result = {
@@ -429,9 +463,12 @@ def get_inventory_file(name: str, filename: str):
 
     with open(inv_file, "r") as f:
         content = json.load(f)
+    from datetime import datetime, timezone as tz
+    mtime = os.path.getmtime(inv_file)
+    ts = datetime.fromtimestamp(mtime, tz=tz.utc).isoformat()
     return jsonify({
         "success": True,
-        "data": {"name": name, "file": filename, "content": content}
+        "data": {"name": name, "file": filename, "content": content, "timestamp": ts}
     })
 
 
@@ -463,43 +500,129 @@ def post_inventory(name: str):
     inv_dir = os.path.join(data_dir, "inventory")
     os.makedirs(inv_dir, exist_ok=True)
 
-    from datetime import datetime, timezone
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    inv_file = os.path.join(inv_dir, f"{timestamp}.json")
+    # Use "name" field from body as filename if present; otherwise timestamp.
+    file_name = inv_data.get("name", None)
+    if file_name and isinstance(file_name, str) and file_name.strip():
+        # Sanitize: reject names with path separators.
+        safe_name = file_name.strip()
+        if "/" in safe_name or "\\" in safe_name:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"Invalid 'name' field: '{safe_name}' contains path separators"}
+            }), 400
+        inv_file = os.path.join(inv_dir, f"{safe_name}.json")
+    else:
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        inv_file = os.path.join(inv_dir, f"{timestamp}.json")
+
     with open(inv_file, "w") as f:
         json.dump(inv_data, f, indent=4)
 
-    logger.info(f"Inventory data posted for VM [{name}] → {timestamp}.json")
+    stored_name = os.path.basename(inv_file)
+    logger.info(f"Inventory data posted for VM [{name}] → {stored_name}")
     return jsonify({
         "success": True,
-        "data": {"name": name, "file": f"{timestamp}.json"}
+        "data": {"name": name, "file": stored_name}
     }), 201
+
+
+@vm_bp.route("/<name>/inventory/<filename>", methods=["PATCH"])
+def patch_inventory(name: str, filename: str):
+    """Patch an inventory file — JSON deep-merge the request body into the existing content."""
+    logger = _get_logger()
+    vm_def = read_entity_data(current_app, "vm", name)
+    if vm_def is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+        }), 404
+
+    inv_file = os.path.join(vm_data_dir(current_app, name), "inventory", filename)
+    if not os.path.isfile(inv_file):
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND", "message": f"Inventory file '{filename}' not found"}
+        }), 404
+
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
+        }), 400
+
+    patch_data = request.get_json()
+    if patch_data is None:
+        return jsonify({
+            "success": False,
+            "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
+        }), 400
+
+    with open(inv_file, "r") as f:
+        existing = json.load(f)
+
+    _deep_merge(existing, patch_data)
+
+    with open(inv_file, "w") as f:
+        json.dump(existing, f, indent=4)
+
+    logger.info(f"Inventory file [{filename}] patched for VM [{name}]")
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "file": filename}
+    })
+
+
+def _deep_merge(base: dict, patch: dict):
+    """Recursively merge patch into base in-place."""
+    for key, value in patch.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
 
 
 @vm_bp.route("/<name>", methods=["DELETE"])
 def delete_vm(name: str):
     logger = _get_logger()
     data = read_entity_data(current_app, "vm", name)
-    if data is None:
+
+    # Managed VM: full cleanup (virsh destroy + remove data dir).
+    if data is not None:
+        data["vmState"] = KvmVm.Keyword.VmStates.NotExists
+        write_entity_data(current_app, "vm", name, data)
+        vm_path = vm_json_path(current_app, name)
+        vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
+        vm.Process()
+        vm_root = vm_dir(current_app, name)
+        if os.path.isdir(vm_root):
+            Util.run_command(f"rm -rf {vm_root}")
+        return jsonify({
+            "success": True,
+            "data": {"name": name, "deleted": True, "managed": True}
+        })
+
+    # Unmanaged VM: just destroy via virsh.
+    virsh_state = _get_virsh_state(name)
+    if virsh_state == KvmVm.Keyword.VmStates.NotExists:
         return jsonify({
             "success": False,
             "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
         }), 404
 
-    data["vmState"] = KvmVm.Keyword.VmStates.NotExists
-    write_entity_data(current_app, "vm", name, data)
-
-    vm_path = vm_json_path(current_app, name)
-    vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
-    vm.Process()
-
-    vm_root = vm_dir(current_app, name)
-    if os.path.isdir(vm_root):
-        Util.run_command(f"rm -rf {vm_root}")
+    logger.info(f"Destroying unmanaged VM [{name}] (virsh state: {virsh_state})")
+    if virsh_state == KvmVm.Keyword.VmStates.Running:
+        Util.run_command(f"virsh destroy {name}")
+    # Undefine to remove from virsh (ignore if already gone).
+    try:
+        Util.run_command(f"virsh undefine {name}")
+    except SystemError:
+        pass
 
     return jsonify({
         "success": True,
-        "data": {"name": name, "deleted": True}
+        "data": {"name": name, "deleted": True, "managed": False}
     })
 
 
@@ -547,58 +670,175 @@ def stop_vm(name: str):
     })
 
 
-@vm_bp.route("", methods=["PATCH"])
-def patch_vm():
-    """Patch a VM's state (start/stop). Request body per vm_patch_sample.json."""
+@vm_bp.route("/<name>/commit", methods=["POST"])
+def commit_vm_image(name: str):
+    """Commit a VM's qcow2 disk changes back to its backing base image.
+
+    Request body (optional):
+        {"disk": 0}            — disk index (0=first), default 0
+        {"disk": "disk-ubuntu.json"}  — disk definition filename
+
+    Prerequisites:
+      - vmState == "stopped"
+      - VM must not exist in virsh (destroyed)
+    The backing image is auto-detected from the VM's qcow2 disk.
+    """
     logger = _get_logger()
-    if not request.is_json:
-        return jsonify({
-            "success": False,
-            "error": {"code": "BAD_REQUEST", "message": "Content-Type must be application/json"}
-        }), 400
 
-    data = request.get_json()
-    if data is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "BAD_REQUEST", "message": "Request body is not valid JSON"}
-        }), 400
+    # Parse request body for disk selection.
+    disk_selector = 0  # default: first disk
+    if request.is_json:
+        body = request.get_json()
+        if body and "disk" in body:
+            disk_selector = body["disk"]
 
-    vm_id = data.get("id", None)
-    vm_state = data.get("vmState", None)
-
-    if vm_id is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "Missing required field 'id'"}
-        }), 400
-    if vm_state is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "Missing required field 'vmState'"}
-        }), 400
-    if vm_state not in (KvmVm.Keyword.VmStates.Running, KvmVm.Keyword.VmStates.Stopped):
-        return jsonify({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR",
-                      "message": f"'vmState' must be '{KvmVm.Keyword.VmStates.Running}' or '{KvmVm.Keyword.VmStates.Stopped}'"}
-        }), 400
-
-    vm_data = read_entity_data(current_app, "vm", vm_id)
+    # 1. Verify VM exists and vmState == "stopped".
+    vm_data = read_entity_data(current_app, "vm", name)
     if vm_data is None:
         return jsonify({
             "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"VM '{vm_id}' not found"}
+            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
         }), 404
 
-    vm_data["vmState"] = vm_state
-    write_entity_data(current_app, "vm", vm_id, vm_data)
+    if vm_data.get("vmState") != KvmVm.Keyword.VmStates.Stopped:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": f"vmState must be 'stopped', got '{vm_data.get('vmState')}'"}
+        }), 400
 
-    vm = KvmVm(logger, vm_json_path(current_app, vm_id), key_dir=_get_host_key_dir())
-    vm.Process()
+    # 2. Verify VM is destroyed in virsh.
+    try:
+        result = Util.run_command("virsh list --name --all")
+        if name in result.stdout_lines:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"VM '{name}' still exists in virsh. "
+                                     f"Run 'virsh destroy {name}' first."}
+            }), 400
+    except SystemError:
+        pass
 
-    logger.info(f"Patch VM [{vm_id}] vmState → {vm_state}")
+    # 3. Resolve disk.
+    disks = vm_data.get("disks", [])
+    if not disks:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": f"VM '{name}' has no disks defined"}
+        }), 400
+
+    # Resolve by index or by filename.
+    if isinstance(disk_selector, int):
+        if disk_selector < 0 or disk_selector >= len(disks):
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"disk index {disk_selector} out of range "
+                                     f"(VM has {len(disks)} disk(s))"}
+            }), 400
+        disk_ref = disks[disk_selector]
+    else:
+        disk_ref = str(disk_selector)
+        # Allow matching by filename (e.g. "disk-ubuntu.json").
+        matched = [d for d in disks if os.path.basename(d) == disk_ref]
+        if not matched:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"disk '{disk_ref}' not found in VM disks"}
+            }), 400
+        disk_ref = matched[0]
+
+    # Parse disk reference (supports {vmPath} placeholder and relative paths).
+    vm_path = vm_data.get("vmPath", vm_dir(current_app, name))
+    if disk_ref.startswith("{vmPath}"):
+        disk_ref = disk_ref.replace("{vmPath}", vm_path, 1)
+    if not os.path.isabs(disk_ref):
+        disk_ref = os.path.join(vm_data_dir(current_app, name), disk_ref)
+    disk_json_path = os.path.normpath(disk_ref)
+
+    if not os.path.isfile(disk_json_path):
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND",
+                      "message": f"Disk definition not found: {disk_json_path}"}
+        }), 404
+
+    with open(disk_json_path, "r") as f:
+        disk_data = json.load(f)
+
+    disk_image_rel = disk_data.get("imagePath")
+    if not disk_image_rel:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR", "message": "Disk missing 'imagePath'"}
+        }), 400
+
+    # Resolve disk image path relative to the disk JSON's own directory.
+    disk_image_abs = os.path.normpath(os.path.join(os.path.dirname(disk_json_path), disk_image_rel))
+
+    if not os.path.isfile(disk_image_abs):
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_FOUND",
+                      "message": f"Disk image file not found: {disk_image_abs}"}
+        }), 404
+
+    # 4. Detect backing image from qemu-img info.
+    try:
+        qemu_info = Util.run_command(f"qemu-img info --output=json {disk_image_abs}")
+        qemu_data = json.loads(qemu_info.stdout)
+        backing_path = qemu_data.get("full-backing-filename", "")
+    except (SystemError, json.JSONDecodeError) as e:
+        return jsonify({
+            "success": False,
+            "error": {"code": "SYSTEM_COMMAND_FAILED",
+                      "message": f"Failed to query disk info: {e}"}
+        }), 500
+
+    if not backing_path:
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "Disk has no backing file to commit to"}
+        }), 400
+
+    # 5. Resolve backing image name from the filesystem.
+    backing_abs = os.path.normpath(backing_path)
+    image_name = os.path.splitext(os.path.basename(backing_abs))[0]
+
+    # Look up managed image.
+    image_data = read_entity_data(current_app, "image", image_name)
+
+    # 6. Commit disk changes to backing image.
+    logger.info(f"Committing VM [{name}] disk [{disk_image_abs}] → image [{image_name}]")
+    try:
+        Util.run_command(f"qemu-img commit {disk_image_abs}")
+    except SystemError as e:
+        return jsonify({
+            "success": False,
+            "error": {"code": "SYSTEM_COMMAND_FAILED",
+                      "message": f"qemu-img commit failed: {e}"}
+        }), 500
+
+    # 7. Update backing image metadata if managed.
+    if image_data is not None:
+        image_data["lastCommitFrom"] = name
+        from datetime import datetime, timezone
+        image_data["lastCommitAt"] = datetime.now(timezone.utc).isoformat()
+        write_entity_data(current_app, "image", image_name, image_data)
+
+    logger.info(f"VM [{name}] committed to image [{image_name}] successfully")
     return jsonify({
         "success": True,
-        "data": {"name": vm_id, "vmState": vm_state}
+        "data": {
+            "vmName": name,
+            "imageName": image_name,
+            "diskPath": disk_image_abs,
+            "message": f"VM '{name}' changes committed to image '{image_name}'"
+        }
     })
+
+

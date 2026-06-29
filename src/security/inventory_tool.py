@@ -77,7 +77,9 @@ def get_inventory_list(host_api_url: str, vm_id: str) -> list:
 
 
 def get_inventory_file(host_api_url: str, vm_id: str, filename: str) -> dict:
-    """GET a specific inventory file from the host."""
+    """GET a specific inventory file from the host.
+    Returns {"content": ..., "timestamp": "..."}
+    """
     url = f"{host_api_url}/api/v1/vms/{vm_id}/inventory/{filename}"
     cmd = ["curl", "-s", url]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -93,7 +95,8 @@ def get_inventory_file(host_api_url: str, vm_id: str, filename: str) -> dict:
         error = resp.get("error", {}).get("message", "Unknown error")
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)
-    return resp["data"]["content"]
+    data = resp["data"]
+    return {"content": data["content"], "timestamp": data.get("timestamp", "")}
 
 
 def main():
@@ -140,8 +143,11 @@ def main():
             output_text += "\n  (none)"
     else:
         # Get specific file.
-        content = get_inventory_file(host_api_url, vm_id, args.get)
-        output_text = json.dumps(content, indent=4)
+        result = get_inventory_file(host_api_url, vm_id, args.get)
+        ts = result.get("timestamp", "")
+        if ts:
+            print(f"Last modified: {ts}")
+        output_text = json.dumps(result["content"], indent=4)
 
     if args.output:
         with open(args.output, "w") as f:
