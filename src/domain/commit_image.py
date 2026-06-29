@@ -50,7 +50,7 @@ def api(path: str, method: str = "GET", data: dict = None) -> dict:
 
 
 def ssh(host: str, *args, retries: int = 3) -> tuple:
-    """SSH with retry. Returns (returncode, stdout)."""
+    """SSH with retry. Returns (returncode, stdout, stderr)."""
     cmd = ["ssh"] + SSH_OPTS
     if SSH_KEY:
         cmd += ["-i", SSH_KEY]
@@ -58,11 +58,11 @@ def ssh(host: str, *args, retries: int = 3) -> tuple:
     for attempt in range(1, retries + 1):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
-            return r.returncode, r.stdout
+            return r.returncode, r.stdout, r.stderr
         if attempt < retries:
             print(f"  SSH failed (rc={r.returncode}), retry {attempt}/{retries} ...")
             time.sleep(5)
-    return r.returncode, r.stdout
+    return r.returncode, r.stdout, r.stderr
 
 
 def get_vm_ip(name: str) -> str:
@@ -113,8 +113,10 @@ def main():
 
     print()
     print(f"[2/5] Running domain prep ({domain}) ...")
-    rc, out = ssh(vm_ip, "sudo", "python3", domain_prep, "--force")
+    rc, out, err = ssh(vm_ip, "sudo", "python3", domain_prep, "--force")
     print(out if out else "  done.")
+    if err:
+        print(f"  stderr: {err.strip()}", file=sys.stderr)
     if rc != 0:
         print(f"  WARNING: domain prep exited with code {rc}", file=sys.stderr)
 
@@ -122,8 +124,10 @@ def main():
 
     print()
     print("[3/5] Running VM prep ...")
-    rc, out = ssh(vm_ip, "sudo", "python3", VM_PREP_PATH, "--force")
+    rc, out, err = ssh(vm_ip, "sudo", "python3", VM_PREP_PATH, "--force")
     print(out if out else "  done.")
+    if err:
+        print(f"  stderr: {err.strip()}", file=sys.stderr)
     if rc != 0:
         print(f"  WARNING: VM prep exited with code {rc}", file=sys.stderr)
 
