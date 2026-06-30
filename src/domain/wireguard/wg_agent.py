@@ -257,7 +257,7 @@ class WgAgent:
         """Return per-peer handshake map.
 
         Keys are peer labels: id > ip > public key.
-        Values are the time string from `wg show latest-handshakes`.
+        Values are human-readable time from `wg show` (e.g. "2 minutes ago").
         """
         # Build pubkey → label map from network config peers.
         pubkey_to_label = {}
@@ -273,16 +273,19 @@ class WgAgent:
         result = {}
         try:
             r = subprocess.run(
-                ["wg", "show", self._network, "latest-handshakes"],
+                ["wg", "show", self._network],
                 capture_output=True, text=True,
             )
-            if r.returncode == 0 and r.stdout.strip():
-                for line in r.stdout.strip().split("\n"):
-                    fields = line.split("\t")
-                    if len(fields) >= 2:
-                        pk = fields[0]
+            if r.returncode == 0:
+                pk = None
+                for line in r.stdout.split("\n"):
+                    s = line.strip()
+                    if s.startswith("peer:"):
+                        pk = s.split(":", 1)[1].strip()
+                    elif pk and s.startswith("latest handshake:"):
                         label = pubkey_to_label.get(pk, pk)
-                        result[label] = fields[1]
+                        handshake = s.split(":", 1)[1].strip()
+                        result[label] = handshake
         except FileNotFoundError:
             pass
         return result
