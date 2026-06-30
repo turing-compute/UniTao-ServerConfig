@@ -116,15 +116,34 @@ Agent 每轮 poll 通过 `POST /api/v1/vms/{name}/inventory` 写入独立文件 
 
 ```json
 // wg0 down
-{"status": [{"key": "state", "value": "down"}]}
+{"status": [
+  {"key": "state", "value": "down"},
+  {"key": "wg-quick@wg0", "value": "inactive"},
+  {"key": "config-update", "value": "2026-06-30T10:30:00Z"}
+]}
 
 // wg0 up
 {"status": [
   {"key": "state", "value": "up"},
+  {"key": "wg-quick@wg0", "value": "active"},
   {"key": "recv_bytes", "value": "1234567"},
-  {"key": "sent_bytes", "value": "890123"}
+  {"key": "sent_bytes", "value": "890123"},
+  {"key": "last-handshake", "value": {
+    "vm-web01": "2 minutes ago",
+    "10.200.0.2/32": "1 hour ago"
+  }},
+  {"key": "config-update", "value": "2026-06-30T10:30:00Z"}
 ]}
 ```
+
+| key | 说明 |
+|------|------|
+| `state` | 接口状态：`up` / `down` |
+| `wg-quick@<net>` | systemd 服务状态（`active` / `inactive` / `failed`） |
+| `recv_bytes` | 接口总接收字节数 |
+| `sent_bytes` | 接口总发送字节数 |
+| `last-handshake` | 各 peer 的握手时间（key 为 peer `id` > `ip` > publicKey） |
+| `config-update` | 最后一次 wg.conf 重新生成的 UTC 时间戳 |
 
 ### Agent 工作流程
 
@@ -132,13 +151,15 @@ Agent 每轮 poll 通过 `POST /api/v1/vms/{name}/inventory` 写入独立文件 
 Agent 启动:
   ① 加载 wireguard_network.json → WgNetworkConfig
   ② 密钥不存在 → wg genkey → 回填 publicKey 到 JSON
-  ③ 进入死循环:
-     a. inventory_tool.py --get wireguard_network_inv.json
-     b. 如果 inv.timestamp != local.timestamp
-        → 把 inv.network 字段合并到 wireguard_network.json
-     c. 如果 selfIp 已分配
-        → 生成 wg.conf → wg-quick up (或 wg syncconf)
-     d. sleep(poll_interval)
+  ③ 上传到 Host inventory
+  ④ 进入轮询循环:
+     a. inventory_tool.py --get wireguard_network.json
+     b. 检查 switch 字段：off → 关闭接口；on → 继续
+     c. 如果 timestamp 变更 → 合并 inv.network 到本地配置
+     d. 如果 assigned_ip 已分配
+        → stop wg-quick → 重写 wg.conf → start wg-quick
+     e. 上报 status 到 wireguard_network_status.json
+     f. sleep(poll_interval)
 ```
 
 ## 部署

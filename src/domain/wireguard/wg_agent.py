@@ -182,10 +182,15 @@ class WgAgent:
             if tmp and os.path.exists(tmp.name):
                 os.unlink(tmp.name)
 
-    def _collect_status(self) -> list:
+    def _collect_status(self, network_cfg: WgNetworkConfig = None) -> list:
         """Collect interface status. When up, includes recv/sent bytes from wg show."""
         if not self._key_manager.interface_exists(self._network):
-            status = [{"key": "state", "value": "down"}]
+            svc_name = f"wg-quick@{self._network}"
+            svc_state = self._wg_service_state()
+            status = [
+                {"key": "state", "value": "down"},
+                {"key": svc_name, "value": svc_state},
+            ]
             if self._last_config_ts is not None:
                 status.append({"key": "config-update", "value": self._format_ts(self._last_config_ts)})
             return status
@@ -221,22 +226,74 @@ class WgAgent:
             except FileNotFoundError:
                 pass
 
+        # Per-peer latest handshake times.
+        handshakes = self._latest_handshakes(network_cfg)
+
+        svc_name = f"wg-quick@{self._network}"
+        svc_state = self._wg_service_state()
         status = [
             {"key": "state", "value": "up"},
+            {"key": svc_name, "value": svc_state},
             {"key": "recv_bytes", "value": str(recv)},
             {"key": "sent_bytes", "value": str(sent)},
+            {"key": "last-handshake", "value": handshakes},
         ]
         if self._last_config_ts is not None:
             status.append({"key": "config-update", "value": self._format_ts(self._last_config_ts)})
         return status
 
+    def _wg_service_state(self) -> str:
+        """Query systemctl is-active for wg-quick@ service."""
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", f"wg-quick@{self._network}"],
+                capture_output=True, text=True,
+            )
+            return r.stdout.strip() if r.stdout.strip() else "unknown"
+        except FileNotFoundError:
+            return "unknown"
+
+    def _latest_handshakes(self, network_cfg: WgNetworkConfig = None) -> dict:
+        """Return per-peer handshake map.
+
+        Keys are peer labels: id > ip > public key.
+        Values are the time string from `wg show latest-handshakes`.
+        """
+        # Build pubkey → label map from network config peers.
+        pubkey_to_label = {}
+        if network_cfg is not None:
+            for peer in network_cfg.peers:
+                pk = peer.get("publicKey", "")
+                if not pk:
+                    continue
+                label = peer.get("id") or peer.get("ip", "")
+                if label:
+                    pubkey_to_label[pk] = str(label)
+
+        result = {}
+        try:
+            r = subprocess.run(
+                ["wg", "show", self._network, "latest-handshakes"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                for line in r.stdout.strip().split("\n"):
+                    fields = line.split("\t")
+                    if len(fields) >= 2:
+                        pk = fields[0]
+                        label = pubkey_to_label.get(pk, pk)
+                        result[label] = fields[1]
+        except FileNotFoundError:
+            pass
+        return result
+
     @staticmethod
     def _format_ts(ts: float) -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
-    def _report_status(self):
+    def _report_status(self, network_cfg: WgNetworkConfig = None):
         """POST status to inventory as a separate file."""
-        status = self._collect_status()
+        status = self._collect_status(network_cfg)
         ok = self._inventory_post(
             {"status": status},
             name=INVENTORY_STATUS_NAME,
@@ -438,7 +495,7 @@ class WgAgent:
             else:
                 print(f"  Waiting for assigned_ip ...")
 
-            self._report_status()
+            self._report_status(network_cfg)
             time.sleep(poll_interval)
 
 
