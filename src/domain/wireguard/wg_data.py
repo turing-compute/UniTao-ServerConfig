@@ -504,10 +504,11 @@ class WgPeerData:
     BASE64_RE = re.compile(r'^[A-Za-z0-9+/=]+$')
 
     class Key:
-        PUBLIC_KEY  = "public_key"
-        ENDPOINT    = "endpoint"
-        ASSIGNED_ID = "assigned_id"
-        ALLOWED_IPS = "allowed_ips"
+        PUBLIC_KEY    = "public_key"
+        ENDPOINT      = "endpoint"
+        ASSIGNED_ID   = "assigned_id"
+        ALLOWED_IPS   = "allowed_ips"
+        PRESHARED_KEY = "preshared_key"
 
     def __init__(self, data: dict):
         """从 JSON 字典构建并校验。
@@ -612,6 +613,22 @@ class WgPeerData:
                     )
                 validate_cidr(cidr)
 
+        # --- presharedKey: 可选, str, 44 字符 base64 ---
+        psk = data.get(K.PRESHARED_KEY, None)
+        if psk is not None:
+            if not isinstance(psk, str) or not psk.strip():
+                raise ValueError(
+                    f"WgPeerData: [{K.PRESHARED_KEY}] must be a non-empty string"
+                )
+            if len(psk) != 44:
+                raise ValueError(
+                    f"WgPeerData: [{K.PRESHARED_KEY}] length must be 44, got {len(psk)}"
+                )
+            if not self.BASE64_RE.match(psk):
+                raise ValueError(
+                    f"WgPeerData: [{K.PRESHARED_KEY}] must be base64 (A-Za-z0-9+/=)"
+                )
+
     # ── 属性访问器 ──────────────────────────────────────────────────────────
 
     @property
@@ -636,6 +653,11 @@ class WgPeerData:
             return None
         ip, _ = parse_cidr(cidr)
         return ip
+
+    @property
+    def preshared_key(self) -> str:
+        """返回 presharedKey，未设时返回 None。"""
+        return self._data.get(self.Key.PRESHARED_KEY, None)
 
     @property
     def allowed_ips(self) -> list:

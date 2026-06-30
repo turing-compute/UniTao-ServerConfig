@@ -18,8 +18,8 @@ import time
 
 INVENTORY_TOOL = "/opt/unitao-server-config/inventory_tool.py"
 REPORT_FILE = "/tmp/inventory_network_report.json"
-MAX_RETRIES = 10
-RETRY_INTERVAL = 6  # seconds
+MAX_RETRIES = 30
+RETRY_INTERVAL = 10  # seconds
 
 
 def collect_network_info() -> dict:
@@ -91,8 +91,21 @@ def main():
     with open(REPORT_FILE, "w") as f:
         json.dump(report, f)
 
-    subprocess.run([sys.executable, INVENTORY_TOOL, "--data", REPORT_FILE], check=False)
-    print("Network config reported to inventory")
+    # Retry POST: routing may not be fully established even after IP is up.
+    for attempt in range(1, MAX_RETRIES + 1):
+        result = subprocess.run(
+            [sys.executable, INVENTORY_TOOL, "--data", REPORT_FILE],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print("Network config reported to inventory")
+            break
+        print(f"  POST failed (attempt {attempt}/{MAX_RETRIES}): {result.stderr.strip()}",
+              file=sys.stderr)
+        time.sleep(RETRY_INTERVAL)
+    else:
+        print("ERROR: failed to report network config after all retries",
+              file=sys.stderr)
 
     if os.path.isfile(REPORT_FILE):
         os.remove(REPORT_FILE)

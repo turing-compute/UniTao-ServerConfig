@@ -60,6 +60,7 @@ class WgAgent:
         self._network = None
         self._key_manager = None
         self._wg_conf_path = None
+        self._last_config_ts = None
 
     # -- Step 0: load agent config ------------------------------------------
 
@@ -181,10 +182,18 @@ class WgAgent:
             if tmp and os.path.exists(tmp.name):
                 os.unlink(tmp.name)
 
-    def _collect_status(self) -> list:
+    def _collect_status(self, network_cfg: WgNetworkConfig = None) -> list:
         """Collect interface status. When up, includes recv/sent bytes from wg show."""
         if not self._key_manager.interface_exists(self._network):
-            return [{"key": "state", "value": "down"}]
+            svc_name = f"wg-quick@{self._network}"
+            svc_state = self._wg_service_state()
+            status = [
+                {"key": "state", "value": "down"},
+                {"key": svc_name, "value": svc_state},
+            ]
+            if self._last_config_ts is not None:
+                status.append({"key": "config-update", "value": self._format_ts(self._last_config_ts)})
+            return status
 
         recv = sent = 0
         try:
@@ -217,15 +226,77 @@ class WgAgent:
             except FileNotFoundError:
                 pass
 
-        return [
+        # Per-peer latest handshake times.
+        handshakes = self._latest_handshakes(network_cfg)
+
+        svc_name = f"wg-quick@{self._network}"
+        svc_state = self._wg_service_state()
+        status = [
             {"key": "state", "value": "up"},
+            {"key": svc_name, "value": svc_state},
             {"key": "recv_bytes", "value": str(recv)},
             {"key": "sent_bytes", "value": str(sent)},
+            {"key": "last-handshake", "value": handshakes},
         ]
+        if self._last_config_ts is not None:
+            status.append({"key": "config-update", "value": self._format_ts(self._last_config_ts)})
+        return status
 
-    def _report_status(self):
+    def _wg_service_state(self) -> str:
+        """Query systemctl is-active for wg-quick@ service."""
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", f"wg-quick@{self._network}"],
+                capture_output=True, text=True,
+            )
+            return r.stdout.strip() if r.stdout.strip() else "unknown"
+        except FileNotFoundError:
+            return "unknown"
+
+    def _latest_handshakes(self, network_cfg: WgNetworkConfig = None) -> dict:
+        """Return per-peer handshake map.
+
+        Keys are peer labels: id > ip > public key.
+        Values are human-readable time from `wg show` (e.g. "2 minutes ago").
+        """
+        # Build pubkey → label map from network config peers.
+        pubkey_to_label = {}
+        if network_cfg is not None:
+            for peer in network_cfg.peers:
+                pk = peer.get("publicKey", "")
+                if not pk:
+                    continue
+                label = peer.get("id") or peer.get("ip", "")
+                if label:
+                    pubkey_to_label[pk] = str(label)
+
+        result = {}
+        try:
+            r = subprocess.run(
+                ["wg", "show", self._network],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                pk = None
+                for line in r.stdout.split("\n"):
+                    s = line.strip()
+                    if s.startswith("peer:"):
+                        pk = s.split(":", 1)[1].strip()
+                    elif pk and s.startswith("latest handshake:"):
+                        label = pubkey_to_label.get(pk, pk)
+                        handshake = s.split(":", 1)[1].strip()
+                        result[label] = handshake
+        except FileNotFoundError:
+            pass
+        return result
+
+    @staticmethod
+    def _format_ts(ts: float) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+    def _report_status(self, network_cfg: WgNetworkConfig = None):
         """POST status to inventory as a separate file."""
-        status = self._collect_status()
+        status = self._collect_status(network_cfg)
         ok = self._inventory_post(
             {"status": status},
             name=INVENTORY_STATUS_NAME,
@@ -287,6 +358,7 @@ class WgAgent:
     # -- Step 3: apply config -----------------------------------------------
 
     def apply_config(self, network_cfg: WgNetworkConfig, private_key: str) -> bool:
+        """Stop wg-quick, regenerate wg.conf, start wg-quick."""
         if not network_cfg.has_network_config:
             print(f"  [WARN] No assigned_ip, cannot apply.", file=sys.stderr)
             return False
@@ -297,69 +369,20 @@ class WgAgent:
         )
 
         os.makedirs(os.path.dirname(self._wg_conf_path), exist_ok=True)
+
+        # 1. Stop
+        self._wg_stop()
+
+        # 2. Regenerate conf
         with open(self._wg_conf_path, "w") as f:
             f.write(conf_text + "\n")
+        print(f"  Regenerated {self._wg_conf_path}")
 
-        iface = self._network
-        if self._key_manager.interface_exists(iface):
-            print(f"  Updating existing interface [{iface}] ...")
-            return self._sync_conf()
-        else:
-            print(f"  Bringing up interface [{iface}] ...")
-            return self._wg_quick_up()
+        # 3. Start
+        return self._wg_start()
 
-    def _wg_quick_up(self) -> bool:
-        try:
-            result = subprocess.run(
-                ["systemctl", "start", f"wg-quick@{self._network}"],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                print(f"  [ERROR] wg-quick up failed: {result.stderr.strip()}",
-                      file=sys.stderr)
-                return False
-            print(f"  Interface [{self._network}] is up.")
-            return True
-        except FileNotFoundError:
-            print(f"  [ERROR] wg-quick not found.", file=sys.stderr)
-            return False
-
-    def _sync_conf(self) -> bool:
-        try:
-            strip_result = subprocess.run(
-                ["wg-quick", "strip", self._network],
-                capture_output=True, text=True,
-            )
-            if strip_result.returncode != 0:
-                print(f"  [WARN] wg-quick strip failed, falling back to restart.",
-                      file=sys.stderr)
-                return self._restart_interface()
-
-            sync_path = os.path.join(
-                os.path.dirname(self._wg_conf_path),
-                f".{self._network}.sync.conf"
-            )
-            with open(sync_path, "w") as f:
-                os.chmod(sync_path, 0o644)
-                f.write(strip_result.stdout)
-
-            sync_result = subprocess.run(
-                ["wg", "syncconf", self._network, sync_path],
-                capture_output=True, text=True,
-            )
-            os.unlink(sync_path)
-
-            if sync_result.returncode != 0:
-                print(f"  [WARN] wg syncconf failed, falling back to restart: {sync_result.stderr.strip()}",
-                      file=sys.stderr)
-                return self._restart_interface()
-            print(f"  Interface [{self._network}] updated (syncconf).")
-            return True
-        except FileNotFoundError:
-            print(f"  [ERROR] wg command not found.", file=sys.stderr)
-            return False
-
-    def _restart_interface(self) -> bool:
+    def _wg_stop(self):
+        """Stop wg-quick@ service if running."""
         try:
             subprocess.run(
                 ["systemctl", "stop", f"wg-quick@{self._network}"],
@@ -367,27 +390,32 @@ class WgAgent:
             )
         except FileNotFoundError:
             pass
-        return self._wg_quick_up()
 
-    def _wg_quick_down(self) -> bool:
-        """Bring down the WireGuard interface via systemctl."""
-        if not self._key_manager.interface_exists(self._network):
-            print(f"  Interface [{self._network}] already down.")
-            return True
+    def _wg_start(self) -> bool:
+        """Start wg-quick@ service."""
         try:
             result = subprocess.run(
-                ["systemctl", "stop", f"wg-quick@{self._network}"],
+                ["systemctl", "start", f"wg-quick@{self._network}"],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:
-                print(f"  [ERROR] wg-quick down failed: {result.stderr.strip()}",
+                print(f"  [ERROR] wg-quick start failed: {result.stderr.strip()}",
                       file=sys.stderr)
                 return False
-            print(f"  Interface [{self._network}] is down (switch=off).")
+            print(f"  Interface [{self._network}] is up.")
             return True
         except FileNotFoundError:
             print(f"  [ERROR] systemctl not found.", file=sys.stderr)
             return False
+
+    def _wg_quick_down(self) -> bool:
+        """Bring down the WireGuard interface via systemctl (switch=off)."""
+        if not self._key_manager.interface_exists(self._network):
+            print(f"  Interface [{self._network}] already down.")
+            return True
+        self._wg_stop()
+        print(f"  Interface [{self._network}] is down (switch=off).")
+        return True
 
     # -- main loop ----------------------------------------------------------
 
@@ -454,13 +482,15 @@ class WgAgent:
                 if self._key_manager.interface_exists(self._network):
                     print(f"  Switch is off, bringing interface down ...")
                     self._wg_quick_down()
+                    self._last_config_ts = time.time()
                 applied = False
             elif network_cfg.has_network_config:
                 if not applied:
                     print(f"  Applying config ...")
                     if self.apply_config(network_cfg, private_key):
                         applied = True
-                    else:
+                    self._last_config_ts = time.time()
+                    if not applied:
                         print(f"  [WARN] Failed to apply config, will retry.",
                               file=sys.stderr)
                 else:
@@ -468,7 +498,7 @@ class WgAgent:
             else:
                 print(f"  Waiting for assigned_ip ...")
 
-            self._report_status()
+            self._report_status(network_cfg)
             time.sleep(poll_interval)
 
 
