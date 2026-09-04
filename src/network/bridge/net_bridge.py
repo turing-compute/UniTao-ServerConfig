@@ -76,6 +76,13 @@ class NetBridge:
                             "bridgeType": NetBridge.Keyword.BridgeTypes.LinuxBridge,
                             "interfaces": [],
                         }
+                    # A single-interface bridge prints its first interface on the
+                    # bridge's own row (column 4); further interfaces follow as
+                    # indented lines handled by the branch below.
+                    if len(parts) > 3:
+                        iface = parts[3]
+                        if iface and iface != current_bridge:
+                            bridges[current_bridge]["interfaces"].append(iface)
                 elif current_bridge:
                     # Interface line — last word is the interface name.
                     parts = line.split()

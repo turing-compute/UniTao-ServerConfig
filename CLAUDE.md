@@ -24,6 +24,10 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 
 # 生成随机 MAC 地址
 ./src/runpy.sh src/network/bridge/generate_mac.py
+
+# 反向生成桥接数据文件 — 人工逐个运行：先用 --name 确定要为哪个网桥生成数据文件（类似 Terraform import）
+./src/runpy.sh src/network/bridge/net_bridge_reverse.py --name br0
+./src/runpy.sh src/network/bridge/net_bridge_reverse.py --name br0 --path <桥接数据文件.json>
 ```
 
 此仓库中**没有测试、没有 lint 配置、也没有构建步骤**。
@@ -70,7 +74,8 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 
 ### 网络桥接 (`src/network/bridge/`)
 
-- **`net_bridge.py`** — 网络桥接的数据模型和验证。支持 `linuxBridge` 和 `ovsBridge` 类型及其关联的接口列表。**注意：** 此模块仅验证 JSON 数据，目前不执行桥接创建命令（与 `kvm_vm.py` 不同）。
+- **`net_bridge.py`** — 网络桥接的数据模型、生命周期操作和实时发现。支持 `linuxBridge` 和 `ovsBridge` 类型及其关联的接口列表；根据 JSON 数据创建/删除网桥、增删接口、设置 MAC。另有静态方法 `discover_system_bridges()`（枚举主机现有网桥）与 `get_live_state()`（查询指定网桥的实时接口和 MAC），供 REST 与逆向工具复用。
+- **`net_bridge_reverse.py`** — `net_bridge.py` 的逆向：读取主机上**已存在**的网桥，生成对应的桥接 JSON 数据文件（`bridgeType`/`interfaces`/`macAddress`），用于把存量网桥纳入数据驱动模型。人工逐个运行：`--name` 指定要生成的网桥（必填），`--path` 指定输出数据文件路径（.json，默认打印到 stdout）。
 - **`generate_mac.py`** — 打印一个随机本地管理 MAC 地址（OUI 前缀 `0E:`）。
 
 ### 归档代码 (`src/Archive/`)
