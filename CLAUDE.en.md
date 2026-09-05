@@ -14,7 +14,7 @@ The primary domain is **KVM virtualization** — creating VMs, disk images, and 
 # Install Python dependencies (wget) to src/extlib/
 ./src/req_install.sh
 
-# Install system packages for KVM (qemu-kvm, libvirt, genisoimage, openvswitch, etc.)
+# Install system packages for KVM (qemu-system-x86, libvirt, genisoimage, openvswitch, etc.)
 ./src/kvm_install.sh
 
 # Run any component — runpy.sh sets PYTHONPATH=src/ then executes python3 with your args
