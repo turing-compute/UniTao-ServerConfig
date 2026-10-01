@@ -131,8 +131,8 @@ ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" \
     "sudo python3 ${AGENT_PKG_DIR}/install.py --network-config ${AGENT_DIR}/wireguard_network.json"
 
 echo ""
-echo "Starting agent ..."
-ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" "sudo systemctl start wg-agent"
+echo "Restarting agent (to reload updated Python code) ..."
+ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" "sudo systemctl restart wg-agent"
 sleep 3
 ssh ${SSH_OPTS} "${SSH_USER}@${VM_IP}" "systemctl is-active wg-agent && echo 'wg-agent is active' || echo 'WARN: wg-agent not active'"
 
