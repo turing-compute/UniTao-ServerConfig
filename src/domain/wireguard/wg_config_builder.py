@@ -61,8 +61,7 @@ class WgConfigBuilder:
             lines.append(f"ListenPort = {listen_port}")
 
         if dns_servers:
-            for dns in dns_servers:
-                lines.append(f"DNS = {dns}")
+            lines.append(f"DNS = {', '.join(dns_servers)}")
 
         lines.append(f"MTU = {mtu}")
 
