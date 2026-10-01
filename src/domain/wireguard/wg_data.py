@@ -357,9 +357,11 @@ class WgNetworkConfig:
         return aip if aip else None
 
     @property
-    def listen_port(self) -> int:
+    def listen_port(self) -> int | None:
         net = self._ensure_network()
-        return net.get(self.Key.DATA_NETWORK_LISTEN_PORT, self.DEFAULT_LISTEN_PORT)
+        if self.Key.DATA_NETWORK_LISTEN_PORT in net:
+            return net[self.Key.DATA_NETWORK_LISTEN_PORT]
+        return self.DEFAULT_LISTEN_PORT
 
     @property
     def dns_servers(self) -> list:

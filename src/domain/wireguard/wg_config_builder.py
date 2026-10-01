@@ -22,7 +22,7 @@ class WgConfigBuilder:
     def build_interface_section(
         private_key: str,
         address: str,
-        listen_port: int,
+        listen_port: int | None,
         dns_servers: list = None,
         mtu: int = 1420,
         post_up: str = None,
@@ -33,7 +33,7 @@ class WgConfigBuilder:
         Args:
             private_key: WireGuard 私钥
             address:     VM 在 VPN 中的地址 (CIDR 格式，如 "10.200.0.1/24")
-            listen_port: 监听端口
+            listen_port: 监听端口 (可选; None 时省略 ListenPort 行)
             dns_servers: DNS 服务器 IP 列表 (可选)
             mtu:         MTU 值 (默认 1420)
             post_up:     PostUp 脚本 (可选)
@@ -57,7 +57,8 @@ class WgConfigBuilder:
         lines.append("[Interface]")
         lines.append(f"PrivateKey = {private_key}")
         lines.append(f"Address = {address}")
-        lines.append(f"ListenPort = {listen_port}")
+        if listen_port is not None:
+            lines.append(f"ListenPort = {listen_port}")
 
         if dns_servers:
             for dns in dns_servers:
