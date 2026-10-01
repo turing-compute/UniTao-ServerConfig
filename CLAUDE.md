@@ -14,7 +14,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 # 安装 Python 依赖（wget）到 src/extlib/
 ./src/req_install.sh
 
-# 安装 KVM 所需的系统软件包（qemu-kvm、libvirt、genisoimage、openvswitch 等）
+# 安装 KVM 所需的系统软件包（qemu-system-x86、libvirt、genisoimage、openvswitch 等）
 ./src/kvm_install.sh
 
 # 运行任意组件 — runpy.sh 设置 PYTHONPATH=src/，然后用你的参数执行 python3
