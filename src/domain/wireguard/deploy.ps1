@@ -138,8 +138,8 @@ Write-Host "[4/4] Running install.py ..."
 ssh @SshOpts "${SshUser}@${VmIp}" "sudo python3 ${AgentPkgDir}/install.py --network-config ${AgentDir}/wireguard_network.json"
 
 Write-Host ""
-Write-Host "Starting agent ..."
-ssh @SshOpts "${SshUser}@${VmIp}" "sudo systemctl start wg-agent"
+Write-Host "Restarting agent (to reload updated Python code) ..."
+ssh @SshOpts "${SshUser}@${VmIp}" "sudo systemctl restart wg-agent"
 Start-Sleep 3
 $status = ssh @SshOpts "${SshUser}@${VmIp}" "systemctl is-active wg-agent"
 Write-Host "  wg-agent: $status"
