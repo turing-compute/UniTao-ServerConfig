@@ -140,6 +140,14 @@ def register_error_handlers(app: Flask):
             "error": {"code": "INTERNAL_ERROR", "message": "An unexpected error occurred"}
         }), 500
 
+    @app.errorhandler(501)
+    def not_implemented(e):
+        return jsonify({
+            "success": False,
+            "error": {"code": "NOT_IMPLEMENTED",
+                      "message": str(e.description) if e.description else "Not implemented"}
+        }), 501
+
     @app.errorhandler(SystemError)
     def system_error(e):
         return jsonify({

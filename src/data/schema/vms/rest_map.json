@@ -1,0 +1,33 @@
+{
+    "resource": "vms",
+    "version": 1,
+    "files": {
+        "vm": {
+            "path": "{vmDataDir}/{vmName}/data/vm-{vmName}.json",
+            "description": "Main VM definition (vm JSON)"
+        },
+        "network": {
+            "path": "{networkRef}",
+            "description": "The single network interface JSON resolved from vm JSON networks[0]; current REST API supports exactly one bridge"
+        }
+    },
+    "fields": {
+        "cpu": {
+            "file": "vm",
+            "path": "smp"
+        },
+        "ramInGB": {
+            "file": "vm",
+            "path": "ramInGB"
+        },
+        "bridge": {
+            "file": "network",
+            "path": "bridgeName",
+            "derive": {
+                "path": "bridgeType",
+                "from": "bridgeEntity",
+                "field": "bridgeType"
+            }
+        }
+    }
+}

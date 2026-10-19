@@ -1,7 +1,10 @@
+import ipaddress
 import json
 import logging
 import os
 import random
+import tempfile
+import threading
 
 from extlib.flask import Blueprint, request, jsonify, current_app
 
@@ -11,9 +14,17 @@ from rest.service import (
     list_entities, read_entity_data, write_entity_data, delete_entity,
     vm_dir, vm_data_dir, vm_json_path, get_data_dir, get_image_file_dir,
 )
+from rest.schema_loader import (
+    load_vm_schemas, check_vm_schema_consistency,
+    artifact_paths_for_changes, remove_artifacts,
+)
 from kvm.vm.kvm_vm import KvmVm
 
 vm_bp = Blueprint("vm", __name__)
+
+# Per-VM lock: serialize PATCH against start/stop/delete for the same VM.
+_vm_locks: dict = {}
+_vm_locks_guard = threading.Lock()
 
 
 def _get_logger() -> logging.Logger:
@@ -44,6 +55,148 @@ def _get_virsh_state(vm_name: str) -> str:
         return KvmVm.Keyword.VmStates.Stopped
     except SystemError:
         return "unknown"
+
+
+def _state_matches(desired_state: str, live_state: str) -> bool:
+    """Compare data-file desired state with live virsh state.
+
+    Managed VMs are created with `virsh create` (transient domains), so a
+    stopped VM has no domain at all: notExists matches desired=stopped.
+    """
+    if live_state == "unknown":
+        return False
+    if desired_state == KvmVm.Keyword.VmStates.Running:
+        return live_state == KvmVm.Keyword.VmStates.Running
+    if desired_state == KvmVm.Keyword.VmStates.Stopped:
+        return live_state != KvmVm.Keyword.VmStates.Running
+    if desired_state == KvmVm.Keyword.VmStates.NotExists:
+        return live_state == KvmVm.Keyword.VmStates.NotExists
+    return False
+
+
+# ── PATCH helpers ──
+
+def _get_vm_lock(vm_name: str) -> threading.Lock:
+    with _vm_locks_guard:
+        return _vm_locks.setdefault(vm_name, threading.Lock())
+
+
+def _patch_error(code: str, message: str, status: int, details: dict = None):
+    error = {"code": code, "message": message}
+    if details is not None:
+        error["details"] = details
+    return jsonify({"success": False, "error": error}), status
+
+
+_PATCH_TYPE_CHECKS = {
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "string": lambda v: isinstance(v, str),
+    "boolean": lambda v: isinstance(v, bool),
+    "array": lambda v: isinstance(v, list),
+    "object": lambda v: isinstance(v, dict),
+    "null": lambda v: v is None,
+}
+
+
+def _validate_patch_value(field: str, value, rule: dict):
+    """Validate a single PATCH value against its rest.json rule.
+
+    Returns an error message, or None when valid. Only first-level scalar
+    fields are supported; array/object rules exist for future use.
+    """
+    expected_type = rule.get("type")
+    if expected_type is not None:
+        types = [expected_type] if isinstance(expected_type, str) else expected_type
+        if not any(_PATCH_TYPE_CHECKS.get(t, lambda _v: False)(value) for t in types):
+            return f"'{field}' must be of type {types}, got {type(value).__name__}"
+
+    enum = rule.get("enum")
+    if enum is not None and value not in enum:
+        return f"'{field}' must be one of {enum}, got {value!r}"
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        minimum = rule.get("minimum")
+        if minimum is not None and value < minimum:
+            return f"'{field}' must be >= {minimum}, got {value}"
+
+    if isinstance(value, str):
+        min_length = rule.get("minLength")
+        if min_length is not None and len(value) < min_length:
+            return f"'{field}' must have length >= {min_length}"
+
+    if isinstance(value, list):
+        min_items = rule.get("minItems")
+        if min_items is not None and len(value) < min_items:
+            return f"'{field}' must contain at least {min_items} item(s)"
+        item_rule = rule.get("items")
+        if item_rule:
+            for idx, item in enumerate(value):
+                error = _validate_patch_value(f"{field}[{idx}]", item, item_rule)
+                if error:
+                    return error
+
+    fmt = rule.get("format")
+    if fmt == "ipv4-cidr" and value is not None:
+        try:
+            ipaddress.IPv4Interface(value)
+        except ValueError:
+            return f"'{field}' must be an IPv4 CIDR (e.g. 192.168.1.10/24)"
+    elif fmt == "ipv4" and value is not None:
+        try:
+            ipaddress.IPv4Address(value)
+        except ValueError:
+            return f"'{field}' must be an IPv4 address"
+
+    return None
+
+
+def _resolve_vm_path(vm_name: str, vm_data: dict) -> str:
+    """Resolve vm JSON vmPath to an absolute path (same rule as KvmVm)."""
+    vm_path = vm_data.get("vmPath") or vm_dir(current_app, vm_name)
+    if not os.path.isabs(vm_path):
+        vm_path = Util.abs_path(vm_data_dir(current_app, vm_name), vm_path)
+    return os.path.normpath(vm_path)
+
+
+def _resolve_vm_ref(vm_name: str, vm_path: str, ref: str) -> str:
+    """Resolve a {vmPath} placeholder or VM-data-relative reference."""
+    if ref.startswith("{vmPath}"):
+        ref = ref.replace("{vmPath}", vm_path, 1)
+    if not os.path.isabs(ref):
+        ref = Util.abs_path(vm_data_dir(current_app, vm_name), ref)
+    return os.path.normpath(ref)
+
+
+def _resolve_ci_iso_path(vm_name: str, vm_data: dict, vm_path: str) -> str:
+    ci_path = vm_data.get("ciIsoPath") or os.path.join(vm_path, "cloud_init.iso")
+    return _resolve_vm_ref(vm_name, vm_path, ci_path)
+
+
+def _read_text(path: str) -> str:
+    with open(path, "r") as f:
+        return f.read()
+
+
+def _atomic_write_json(path: str, data: dict):
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".patch-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=4)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def _restore_files(backups: dict, logger: logging.Logger):
+    for path, content in backups.items():
+        try:
+            with open(path, "w") as f:
+                f.write(content)
+        except OSError as e:
+            logger.error("Failed to restore [%s]: %s", path, e)
 
 
 # ── JSON generators (POST params → definition files per vm_data_sample.json) ──
@@ -583,91 +736,364 @@ def _deep_merge(base: dict, patch: dict):
             base[key] = value
 
 
+@vm_bp.route("/<name>", methods=["PATCH"])
+def patch_vm(name: str):
+    """Partially update a stopped VM (cpu, ramInGB, bridge).
+
+    Allowed fields, validation rules and target mappings are driven by
+    src/data/schema/vms/{rest,rest_map,data_map}.json.
+    """
+    logger = _get_logger()
+
+    if not request.is_json:
+        return _patch_error(
+            "BAD_REQUEST", "Content-Type must be application/json", 400)
+
+    body = request.get_json()
+    if not isinstance(body, dict):
+        return _patch_error(
+            "BAD_REQUEST", "Request body must be a JSON object", 400)
+
+    try:
+        rest_schema, rest_map, data_map = load_vm_schemas()
+    except RuntimeError as e:
+        logger.error("Cannot load vms schema: %s", e)
+        return _patch_error(
+            "INTERNAL_ERROR", "VM schema is not available", 500)
+
+    for warning in check_vm_schema_consistency(rest_schema, rest_map, data_map):
+        logger.warning("Schema inconsistency: %s", warning)
+
+    patch_schema = rest_schema.get("patch", {})
+    allowed_fields = patch_schema.get("allowedFields", {})
+    immutable_fields = patch_schema.get("immutableFields", {})
+
+    with _get_vm_lock(name):
+        vm_data = read_entity_data(current_app, "vm", name)
+        if vm_data is None:
+            return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+
+        # PATCH permission is based on the desired state in the data file.
+        desired_state = vm_data.get("vmState")
+        if desired_state == KvmVm.Keyword.VmStates.NotExists:
+            return _patch_error(
+                "VM_NOT_EXISTS", f"VM '{name}' is marked as notExists", 409)
+        if desired_state not in (KvmVm.Keyword.VmStates.Running,
+                                 KvmVm.Keyword.VmStates.Stopped):
+            return _patch_error(
+                "INTERNAL_ERROR",
+                f"VM '{name}' has an invalid vmState '{desired_state}'", 500)
+
+        if not body:
+            return _patch_error(
+                "EMPTY_PATCH", "Request body has no PATCH fields", 400)
+
+        unknown = sorted(field for field in body if field not in allowed_fields)
+        if unknown:
+            return _patch_error(
+                "INVALID_PATCH_FIELD",
+                f"Unsupported PATCH field(s): {unknown}",
+                400,
+                {
+                    "allowedFields": sorted(allowed_fields.keys()),
+                    "immutableFields": sorted(immutable_fields.keys()),
+                    "schemaUrl": "/api/v1/schema",
+                })
+
+        # ── Validate values ──
+        bridge_entities = {}
+        for field, value in body.items():
+            error = _validate_patch_value(field, value, allowed_fields[field])
+            if error:
+                return _patch_error("VALIDATION_ERROR", error, 400)
+            if allowed_fields[field].get("format") == "managedBridge":
+                bridge_data = read_entity_data(current_app, "bridge", value)
+                if bridge_data is None:
+                    return _patch_error(
+                        "VALIDATION_ERROR",
+                        f"Referenced bridge '{value}' not found in managed bridges",
+                        400)
+                bridge_entities[value] = bridge_data
+
+        # ── Resolve the single network definition (current REST API limit) ──
+        networks = vm_data.get("networks", [])
+        if not isinstance(networks, list) or len(networks) != 1:
+            count = len(networks) if isinstance(networks, list) else 0
+            return _patch_error(
+                "NOT_IMPLEMENTED",
+                f"PATCH is only implemented for VMs with exactly one network: "
+                f"VM '{name}' has {count} entries in networks[]",
+                501)
+        if not isinstance(networks[0], str) or not networks[0]:
+            return _patch_error(
+                "INTERNAL_ERROR",
+                f"VM '{name}' has an invalid networks[0] reference", 500)
+
+        vm_path = _resolve_vm_path(name, vm_data)
+        net_path = _resolve_vm_ref(name, vm_path, networks[0])
+        if not os.path.isfile(net_path):
+            return _patch_error(
+                "INTERNAL_ERROR",
+                f"Network definition not found: {net_path}", 500)
+        net_data = Util.read_json_file(net_path)
+
+        # ── Reconcile desired state with live state, then check permission ──
+        # The request is fully validated before this point, so a malformed
+        # PATCH never changes the VM's live state.
+        live_state = _get_virsh_state(name)
+        if live_state == "unknown":
+            return _patch_error(
+                "SYSTEM_COMMAND_FAILED",
+                f"Cannot determine virsh state for VM '{name}'", 500)
+
+        if not _state_matches(desired_state, live_state):
+            logger.info(
+                "VM [%s] desired state [%s] != live state [%s], reconciling",
+                name, desired_state, live_state)
+            try:
+                KvmVm(logger, vm_json_path(current_app, name),
+                      key_dir=_get_host_key_dir()).Process()
+            except Exception as e:
+                logger.error("Failed to reconcile VM [%s] state: %s", name, e)
+                return _patch_error(
+                    "SYSTEM_COMMAND_FAILED",
+                    f"Failed to reconcile VM '{name}' state: {e}", 500)
+
+            live_state = _get_virsh_state(name)
+            if not _state_matches(desired_state, live_state):
+                return _patch_error(
+                    "SYSTEM_COMMAND_FAILED",
+                    f"Failed to reconcile VM '{name}': desired state "
+                    f"'{desired_state}', live state '{live_state}'", 500)
+
+        if desired_state == KvmVm.Keyword.VmStates.Running:
+            return _patch_error(
+                "VM_RUNNING",
+                f"VM '{name}' desired state is running; "
+                f"stop it before applying PATCH", 409)
+
+        # ── Compute updates (first-level fields only) ──
+        field_map = rest_map.get("fields", {})
+        vm_updates = {}
+        net_updates = {}
+        changed_vm_paths = []
+        changed_net_paths = []
+        updated_fields = []
+
+        for field, value in body.items():
+            mapping = field_map.get(field)
+            if mapping is None:
+                return _patch_error(
+                    "INTERNAL_ERROR",
+                    f"No rest_map mapping for PATCH field '{field}'", 500)
+
+            target_path = mapping["path"]
+            if mapping["file"] == "vm":
+                if vm_data.get(target_path) != value:
+                    vm_updates[target_path] = value
+                    changed_vm_paths.append(target_path)
+                    updated_fields.append(field)
+            elif mapping["file"] == "network":
+                changed = False
+                if net_data.get(target_path) != value:
+                    net_updates[target_path] = value
+                    changed_net_paths.append(target_path)
+                    changed = True
+
+                derive = mapping.get("derive")
+                if derive and derive.get("from") == "bridgeEntity":
+                    bridge_data = bridge_entities.get(value)
+                    if bridge_data is None:
+                        return _patch_error(
+                            "INTERNAL_ERROR",
+                            f"Bridge entity for '{value}' was not loaded", 500)
+                    derived_value = bridge_data.get(derive.get("field"))
+                    if derived_value is None:
+                        return _patch_error(
+                            "VALIDATION_ERROR",
+                            f"Managed bridge '{value}' has no "
+                            f"'{derive.get('field')}' value", 400)
+                    if net_data.get(derive["path"]) != derived_value:
+                        net_updates[derive["path"]] = derived_value
+                        changed_net_paths.append(derive["path"])
+                        changed = True
+
+                if changed:
+                    updated_fields.append(field)
+            else:
+                return _patch_error(
+                    "INTERNAL_ERROR",
+                    f"Unknown rest_map target file '{mapping['file']}'", 500)
+
+        if not updated_fields:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "name": name,
+                    "updated": [],
+                    "networkFile": os.path.basename(net_path),
+                    "removedGeneratedFiles": [],
+                    "vmState": vm_data.get("vmState"),
+                    "warnings": [],
+                }
+            })
+
+        # ── Write atomically, then re-validate the combined definition ──
+        vm_file = vm_json_path(current_app, name)
+        backups = {}
+        try:
+            if vm_updates:
+                backups[vm_file] = _read_text(vm_file)
+                new_vm_data = dict(vm_data)
+                new_vm_data.update(vm_updates)
+                _atomic_write_json(vm_file, new_vm_data)
+            if net_updates:
+                backups[net_path] = _read_text(net_path)
+                new_net_data = dict(net_data)
+                new_net_data.update(net_updates)
+                _atomic_write_json(net_path, new_net_data)
+
+            # KvmVm only validates here; it does not execute virsh commands.
+            KvmVm(logger, vm_file, key_dir=_get_host_key_dir())
+        except ValueError as e:
+            _restore_files(backups, logger)
+            return _patch_error("VALIDATION_ERROR", str(e), 400)
+        except SystemError as e:
+            _restore_files(backups, logger)
+            return _patch_error("SYSTEM_COMMAND_FAILED", str(e), 500)
+        except Exception as e:
+            _restore_files(backups, logger)
+            logger.error("Unexpected error while patching VM [%s]: %s", name, e)
+            return _patch_error(
+                "INTERNAL_ERROR", "Unexpected error while patching VM", 500)
+
+        # ── Invalidate generated artifacts (data_map driven) ──
+        changed_by_file = {}
+        if changed_vm_paths:
+            changed_by_file["vm"] = changed_vm_paths
+        if changed_net_paths:
+            changed_by_file["network"] = changed_net_paths
+
+        ci_iso_path = _resolve_ci_iso_path(name, vm_data, vm_path)
+        variables = {
+            "vmPath": vm_path,
+            "vmName": name,
+            "ciIsoPath": ci_iso_path,
+        }
+        artifact_paths = artifact_paths_for_changes(
+            changed_by_file, data_map, variables)
+        removed, warnings = remove_artifacts(artifact_paths, vm_path)
+
+        # A persistent (defined) domain would not be rebuilt by create_vm().
+        if live_state == KvmVm.Keyword.VmStates.Stopped:
+            try:
+                Util.run_command(f"virsh undefine {name}")
+            except SystemError as e:
+                warnings.append(
+                    f"Failed to undefine persistent domain '{name}': {e}")
+
+        logger.info("PATCH VM [%s] updated fields: %s", name, updated_fields)
+        return jsonify({
+            "success": True,
+            "data": {
+                "name": name,
+                "updated": updated_fields,
+                "networkFile": os.path.basename(net_path),
+                "removedGeneratedFiles": removed,
+                "vmState": vm_data.get("vmState"),
+                "warnings": warnings,
+            }
+        })
+
+
 @vm_bp.route("/<name>", methods=["DELETE"])
 def delete_vm(name: str):
     logger = _get_logger()
-    data = read_entity_data(current_app, "vm", name)
+    with _get_vm_lock(name):
+        data = read_entity_data(current_app, "vm", name)
 
-    # Managed VM: full cleanup (virsh destroy + remove data dir).
-    if data is not None:
-        data["vmState"] = KvmVm.Keyword.VmStates.NotExists
-        write_entity_data(current_app, "vm", name, data)
-        vm_path = vm_json_path(current_app, name)
-        vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
-        vm.Process()
-        vm_root = vm_dir(current_app, name)
-        if os.path.isdir(vm_root):
-            Util.run_command(f"rm -rf {vm_root}")
+        # Managed VM: full cleanup (virsh destroy + remove data dir).
+        if data is not None:
+            data["vmState"] = KvmVm.Keyword.VmStates.NotExists
+            write_entity_data(current_app, "vm", name, data)
+            vm_path = vm_json_path(current_app, name)
+            vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir())
+            vm.Process()
+            vm_root = vm_dir(current_app, name)
+            if os.path.isdir(vm_root):
+                Util.run_command(f"rm -rf {vm_root}")
+            return jsonify({
+                "success": True,
+                "data": {"name": name, "deleted": True, "managed": True}
+            })
+
+        # Unmanaged VM: just destroy via virsh.
+        virsh_state = _get_virsh_state(name)
+        if virsh_state == KvmVm.Keyword.VmStates.NotExists:
+            return jsonify({
+                "success": False,
+                "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+            }), 404
+
+        logger.info(f"Destroying unmanaged VM [{name}] (virsh state: {virsh_state})")
+        if virsh_state == KvmVm.Keyword.VmStates.Running:
+            Util.run_command(f"virsh destroy {name}")
+        # Undefine to remove from virsh (ignore if already gone).
+        try:
+            Util.run_command(f"virsh undefine {name}")
+        except SystemError:
+            pass
+
         return jsonify({
             "success": True,
-            "data": {"name": name, "deleted": True, "managed": True}
+            "data": {"name": name, "deleted": True, "managed": False}
         })
-
-    # Unmanaged VM: just destroy via virsh.
-    virsh_state = _get_virsh_state(name)
-    if virsh_state == KvmVm.Keyword.VmStates.NotExists:
-        return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
-        }), 404
-
-    logger.info(f"Destroying unmanaged VM [{name}] (virsh state: {virsh_state})")
-    if virsh_state == KvmVm.Keyword.VmStates.Running:
-        Util.run_command(f"virsh destroy {name}")
-    # Undefine to remove from virsh (ignore if already gone).
-    try:
-        Util.run_command(f"virsh undefine {name}")
-    except SystemError:
-        pass
-
-    return jsonify({
-        "success": True,
-        "data": {"name": name, "deleted": True, "managed": False}
-    })
 
 
 @vm_bp.route("/<name>/start", methods=["POST"])
 def start_vm(name: str):
     logger = _get_logger()
-    data = read_entity_data(current_app, "vm", name)
-    if data is None:
+    with _get_vm_lock(name):
+        data = read_entity_data(current_app, "vm", name)
+        if data is None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+            }), 404
+
+        data["vmState"] = KvmVm.Keyword.VmStates.Running
+        write_entity_data(current_app, "vm", name, data)
+
+        vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
+        vm.Process()
+
         return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
-        }), 404
-
-    data["vmState"] = KvmVm.Keyword.VmStates.Running
-    write_entity_data(current_app, "vm", name, data)
-
-    vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
-    vm.Process()
-
-    return jsonify({
-        "success": True,
-        "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Running}
-    })
+            "success": True,
+            "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Running}
+        })
 
 
 @vm_bp.route("/<name>/stop", methods=["POST"])
 def stop_vm(name: str):
     logger = _get_logger()
-    data = read_entity_data(current_app, "vm", name)
-    if data is None:
+    with _get_vm_lock(name):
+        data = read_entity_data(current_app, "vm", name)
+        if data is None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
+            }), 404
+
+        data["vmState"] = KvmVm.Keyword.VmStates.Stopped
+        write_entity_data(current_app, "vm", name, data)
+
+        vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
+        vm.Process()
+
         return jsonify({
-            "success": False,
-            "error": {"code": "NOT_FOUND", "message": f"VM '{name}' not found"}
-        }), 404
-
-    data["vmState"] = KvmVm.Keyword.VmStates.Stopped
-    write_entity_data(current_app, "vm", name, data)
-
-    vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
-    vm.Process()
-
-    return jsonify({
-        "success": True,
-        "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Stopped}
-    })
+            "success": True,
+            "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Stopped}
+        })
 
 
 @vm_bp.route("/<name>/commit", methods=["POST"])
