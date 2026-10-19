@@ -1,0 +1,57 @@
+{
+    "resource": "vms",
+    "version": 1,
+    "artifacts": {
+        "vmDefScript": "{vmPath}/vm_def_create_{vmName}.sh",
+        "vmDefXml": "{vmPath}/vm_def_{vmName}.xml",
+        "ciIso": "{ciIsoPath}",
+        "ciDataDir": "{vmPath}/ci_data"
+    },
+    "dependencies": {
+        "vm": {
+            "smp": [
+                "vmDefScript",
+                "vmDefXml",
+                "ciIso",
+                "ciDataDir"
+            ],
+            "ramInGB": [
+                "vmDefScript",
+                "vmDefXml",
+                "ciIso",
+                "ciDataDir"
+            ]
+        },
+        "network": {
+            "bridgeName": [
+                "vmDefScript",
+                "vmDefXml",
+                "ciIso",
+                "ciDataDir"
+            ],
+            "bridgeType": [
+                "vmDefScript",
+                "vmDefXml",
+                "ciIso",
+                "ciDataDir"
+            ]
+        }
+    },
+    "neverDelete": {
+        "dataDir": "data/** — source JSON definitions",
+        "inventoryDir": "data/inventory/** — VM-reported data",
+        "requestJson": "data/request.json — original create request (traceability)",
+        "diskImages": "imagePath resolved from disk JSON — deleting is data loss",
+        "ciYamlFiles": "user-data.yaml / meta-data.yaml / network-config.yaml are overwritten by create_ci_iso on next start"
+    },
+    "notPatchable": {
+        "disk": [
+            "imagePath",
+            "imageSource",
+            "imageFormat",
+            "sizeInGB",
+            "baseImagePath",
+            "baseImageFormat"
+        ]
+    }
+}

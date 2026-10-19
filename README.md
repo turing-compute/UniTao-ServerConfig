@@ -37,7 +37,8 @@ Flask Agent 部署在每台 KVM Host 上，通过 HTTP API 管理资源。
 | 端点 | 说明 |
 |------|------|
 | `GET/POST /api/v1/vms` | 列出/创建 VM |
-| `GET/DELETE /api/v1/vms/<name>` | 获取/删除 VM |
+| `GET/PATCH/DELETE /api/v1/vms/<name>` | 获取/修改/删除 VM |
+| `GET /api/v1/schema` | 聚合返回所有资源 REST schema |
 | `POST /api/v1/vms/<name>/start` | 启动 VM |
 | `POST /api/v1/vms/<name>/stop` | 停止 VM |
 | `POST /api/v1/vms/<name>/commit` | 提交磁盘变更到 base image |

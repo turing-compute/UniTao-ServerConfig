@@ -1,0 +1,58 @@
+{
+    "resource": "vms",
+    "basePath": "/api/v1/vms",
+    "version": 1,
+    "endpoints": {
+        "GET    /api/v1/vms": "List all VMs (managed + virsh-only)",
+        "POST   /api/v1/vms": "Create a VM",
+        "GET    /api/v1/vms/<name>": "Get VM details",
+        "PATCH  /api/v1/vms/<name>": "Partially update a stopped VM (fields: cpu, ramInGB, bridge)",
+        "DELETE /api/v1/vms/<name>": "Delete VM",
+        "POST   /api/v1/vms/<name>/start": "Start VM",
+        "POST   /api/v1/vms/<name>/stop": "Stop VM",
+        "POST   /api/v1/vms/<name>/commit": "Commit disk changes to backing image",
+        "GET    /api/v1/vms/<name>/inventory": "List inventory files",
+        "GET    /api/v1/vms/<name>/inventory/<file>": "Get inventory file",
+        "POST   /api/v1/vms/<name>/inventory": "Upload inventory file",
+        "PATCH  /api/v1/vms/<name>/inventory/<file>": "Deep-merge inventory file"
+    },
+    "patch": {
+        "description": "Partial update of a managed, non-running VM. Only top-level scalar fields that also appear in the POST /api/v1/vms request schema are accepted.",
+        "source": "POST /api/v1/vms request schema",
+        "allowedFields": {
+            "cpu": {
+                "type": "integer",
+                "minimum": 1
+            },
+            "ramInGB": {
+                "type": "integer",
+                "minimum": 1
+            },
+            "bridge": {
+                "type": "string",
+                "minLength": 1,
+                "format": "managedBridge"
+            }
+        },
+        "immutableFields": {
+            "id": "VM identity is the JSON filename",
+            "osImage": "Changing the base image is a rebuild, not a patch",
+            "osVariant": "Not in scope for this iteration",
+            "ipv4": "Not in scope for this iteration",
+            "gateway4": "Not in scope for this iteration",
+            "useDHCP4": "Not in scope for this iteration",
+            "authType": "Not in scope for this iteration",
+            "customerPWD": "Not in scope for this iteration",
+            "customerKeys": "Not in scope for this iteration",
+            "shareInventoryData": "Not in scope for this iteration",
+            "prepareDomainImage": "Not in scope for this iteration",
+            "macAddress": "Tied to cloud-init network config; not patchable in v1",
+            "disks": "Disk topology/top-level array is not patchable",
+            "networks": "Network topology/top-level array is not patchable",
+            "vmPath": "Path is derived from vmDataDir/<name>",
+            "vmState": "Use POST /start and /stop",
+            "useCloudInit": "Cloud-init mode is fixed at creation",
+            "ciIsoPath": "Generated artifact path"
+        }
+    }
+}

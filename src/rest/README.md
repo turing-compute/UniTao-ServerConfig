@@ -94,6 +94,7 @@ POST /api/v1/images/<name>
 | GET | `/api/v1/vms` | 列出所有 VM |
 | POST | `/api/v1/vms` | 创建/更新 VM |
 | GET | `/api/v1/vms/<name>` | 查看 VM 详情（virsh state、disk/net JSON、inventory） |
+| PATCH | `/api/v1/vms/<name>` | 修改 VM（`cpu`、`ramInGB`、`bridge`） |
 | DELETE | `/api/v1/vms/<name>` | 删除 VM |
 | POST | `/api/v1/vms/<name>/start` | 启动 VM |
 | POST | `/api/v1/vms/<name>/stop` | 停止 VM |
@@ -157,6 +158,55 @@ POST /api/v1/vms/<name>/commit
 ```
 
 要求 VM 已停止且 virsh state 为 `notExists` 或 `shutOff`。
+
+### 修改 VM（PATCH）
+
+只支持修改一级标量字段，且 VM 必须处于停止状态：
+
+```json
+PATCH /api/v1/vms/my-vm
+{
+  "cpu": 4,
+  "ramInGB": 8,
+  "bridge": "ovs-br0"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `cpu` | int | 正整数，写入 vm JSON 的 `smp` |
+| `ramInGB` | int | 正整数，写入 vm JSON 的 `ramInGB` |
+| `bridge` | string | 必须是已管理的网桥；`bridgeType` 自动同步到 net JSON |
+
+约束：
+
+- VM 正在运行（virsh state = running）时返回 `409 VM_RUNNING`。
+- 非法字段返回 `400 INVALID_PATCH_FIELD`，并在 `error.details` 中返回 PATCH schema 白名单。
+- 当前只支持单网卡；VM 的 `networks` 数组长度不为 1 时返回 `501 NOT_IMPLEMENTED`。
+- 修改后会删除 `vm_def_*.xml`、`cloud_init.iso`、`ci_data/` 等生成文件，下次 `POST /start` 时按新数据重建。磁盘镜像和 `data/**` 不会被删除。
+- 完整的 PATCH schema 可通过 `GET /api/v1/schema` 获取。
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "name": "my-vm",
+    "updated": ["cpu", "bridge"],
+    "networkFile": "net-br0.json",
+    "removedGeneratedFiles": ["/opt/kvm/vms/my-vm/vm_def_my-vm.xml"],
+    "vmState": "stopped",
+    "warnings": []
+  }
+}
+```
+
+### Schema
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/schema` | 聚合返回 `src/data/schema/*/rest.json` 的内容 |
 
 ---
 
