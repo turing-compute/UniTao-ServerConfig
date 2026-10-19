@@ -57,6 +57,23 @@ def _get_virsh_state(vm_name: str) -> str:
         return "unknown"
 
 
+def _state_matches(desired_state: str, live_state: str) -> bool:
+    """Compare data-file desired state with live virsh state.
+
+    Managed VMs are created with `virsh create` (transient domains), so a
+    stopped VM has no domain at all: notExists matches desired=stopped.
+    """
+    if live_state == "unknown":
+        return False
+    if desired_state == KvmVm.Keyword.VmStates.Running:
+        return live_state == KvmVm.Keyword.VmStates.Running
+    if desired_state == KvmVm.Keyword.VmStates.Stopped:
+        return live_state != KvmVm.Keyword.VmStates.Running
+    if desired_state == KvmVm.Keyword.VmStates.NotExists:
+        return live_state == KvmVm.Keyword.VmStates.NotExists
+    return False
+
+
 # ── PATCH helpers ──
 
 def _get_vm_lock(vm_name: str) -> threading.Lock:
@@ -756,18 +773,16 @@ def patch_vm(name: str):
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
 
-        virsh_state = _get_virsh_state(name)
-        if virsh_state == KvmVm.Keyword.VmStates.Running:
-            return _patch_error(
-                "VM_RUNNING",
-                f"VM '{name}' is running; stop it before applying PATCH", 409)
-        if virsh_state == "unknown":
-            return _patch_error(
-                "SYSTEM_COMMAND_FAILED",
-                f"Cannot determine virsh state for VM '{name}'", 500)
-        if vm_data.get("vmState") == KvmVm.Keyword.VmStates.NotExists:
+        # PATCH permission is based on the desired state in the data file.
+        desired_state = vm_data.get("vmState")
+        if desired_state == KvmVm.Keyword.VmStates.NotExists:
             return _patch_error(
                 "VM_NOT_EXISTS", f"VM '{name}' is marked as notExists", 409)
+        if desired_state not in (KvmVm.Keyword.VmStates.Running,
+                                 KvmVm.Keyword.VmStates.Stopped):
+            return _patch_error(
+                "INTERNAL_ERROR",
+                f"VM '{name}' has an invalid vmState '{desired_state}'", 500)
 
         if not body:
             return _patch_error(
@@ -821,6 +836,41 @@ def patch_vm(name: str):
                 "INTERNAL_ERROR",
                 f"Network definition not found: {net_path}", 500)
         net_data = Util.read_json_file(net_path)
+
+        # ── Reconcile desired state with live state, then check permission ──
+        # The request is fully validated before this point, so a malformed
+        # PATCH never changes the VM's live state.
+        live_state = _get_virsh_state(name)
+        if live_state == "unknown":
+            return _patch_error(
+                "SYSTEM_COMMAND_FAILED",
+                f"Cannot determine virsh state for VM '{name}'", 500)
+
+        if not _state_matches(desired_state, live_state):
+            logger.info(
+                "VM [%s] desired state [%s] != live state [%s], reconciling",
+                name, desired_state, live_state)
+            try:
+                KvmVm(logger, vm_json_path(current_app, name),
+                      key_dir=_get_host_key_dir()).Process()
+            except Exception as e:
+                logger.error("Failed to reconcile VM [%s] state: %s", name, e)
+                return _patch_error(
+                    "SYSTEM_COMMAND_FAILED",
+                    f"Failed to reconcile VM '{name}' state: {e}", 500)
+
+            live_state = _get_virsh_state(name)
+            if not _state_matches(desired_state, live_state):
+                return _patch_error(
+                    "SYSTEM_COMMAND_FAILED",
+                    f"Failed to reconcile VM '{name}': desired state "
+                    f"'{desired_state}', live state '{live_state}'", 500)
+
+        if desired_state == KvmVm.Keyword.VmStates.Running:
+            return _patch_error(
+                "VM_RUNNING",
+                f"VM '{name}' desired state is running; "
+                f"stop it before applying PATCH", 409)
 
         # ── Compute updates (first-level fields only) ──
         field_map = rest_map.get("fields", {})
@@ -935,7 +985,7 @@ def patch_vm(name: str):
         removed, warnings = remove_artifacts(artifact_paths, vm_path)
 
         # A persistent (defined) domain would not be rebuilt by create_vm().
-        if virsh_state == KvmVm.Keyword.VmStates.Stopped:
+        if live_state == KvmVm.Keyword.VmStates.Stopped:
             try:
                 Util.run_command(f"virsh undefine {name}")
             except SystemError as e:

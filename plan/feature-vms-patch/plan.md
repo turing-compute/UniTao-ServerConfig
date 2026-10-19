@@ -309,10 +309,9 @@ Content-Type: application/json
 1. 校验 `Content-Type: application/json`，body 必须是 JSON object。
 2. 读取 `rest.json` / `rest_map.json` / `data_map.json`（在 `schema_loader.py` 中按路径加载，可加进程内缓存）。
 3. 读取 VM 定义；不存在 → `404 NOT_FOUND`。
-4. 状态检查（对应目标 7.1）——**复用 `src/rest/api_vm.py:36` 的 `_get_virsh_state(name)`**，不新增 virsh 封装：
-   - 返回 `Running` → `409 VM_RUNNING`。
-   - 返回 `"unknown"`（virsh 调用失败）→ `500 SYSTEM_COMMAND_FAILED`。
-   - VM 数据 `vmState == notExists` → `409 VM_NOT_EXISTS`（数据处于待删除状态，不接收修改）。
+4. 期望状态初检（无副作用）：
+   - `vmState == notExists` → `409 VM_NOT_EXISTS`（数据处于待删除状态，不接收修改）。
+   - `vmState` 不是 `running` / `stopped` → `500 INTERNAL_ERROR`。
 5. 剩余字段为空 → `400 EMPTY_PATCH`。
 6. 字段白名单校验（对应目标 7.2）：
    - 未在 `allowedFields` 中 → `400 INVALID_PATCH_FIELD`，错误中附带 `patch` schema（见 6.5）。
@@ -321,20 +320,26 @@ Content-Type: application/json
 7. 解析目标文件（只处理一级字段）：
    - `vm` → `vm-<name>.json`。
    - `network` → 读取 vm JSON 的 `networks`；要求长度恰好为 1。若长度不为 1，返回 `501 NOT_IMPLEMENTED`（当前 REST API / PATCH 只实现单网桥，无法判断应修改哪一块网卡），并在 message 中写明实际长度和原因。按 `{vmPath}` / 相对路径解析得到 net JSON。
-8. 在内存中计算目标文件的最终内容：
+8. live 状态检查与调和（对应目标 7.1）——**PATCH 权限以期望状态为准，不用 live 状态判定**：
+   - `virsh` 查询失败（live state = `unknown`）→ `500 SYSTEM_COMMAND_FAILED`。
+   - 期望状态与 live 状态不一致时，先用 `KvmVm.Process()`（`src/kvm/vm/kvm_vm.py:197`）调和，让 live 状态追上期望状态；调和后仍不一致 → `500 SYSTEM_COMMAND_FAILED`。
+   - 期望状态 `running` → `409 VM_RUNNING`（`stop` 之后再 PATCH）。
+   - 匹配规则：`running ↔ running`；`stopped ↔ 非 running`（瞬态域 destroy 后为 `notExists`）；`notExists ↔ notExists`。
+   - 该步骤放在请求校验之后，避免非法 PATCH 请求改动 VM 的 live 状态。
+9. 在内存中计算目标文件的最终内容：
    - `cpu` → `smp`，`ramInGB` → `ramInGB`。
    - `bridge` → `bridgeName`，并从 managed bridge 数据中取 `bridgeType` 同步写入。
    - 与现值相同则视为 no-op。
-9. 原子写入（临时文件 + `os.replace`），写入前备份原内容。
-10. 写完后用 `KvmVm(logger, vm_json_path)` 构造一次（只做 `Validate`，不执行命令，见 `src/kvm/vm/kvm_vm.py:78-102`）；失败则用备份恢复所有已写文件并返回 `400 VALIDATION_ERROR`。
-11. 失效生成文件（对应目标 7.3）：
+10. 原子写入（临时文件 + `os.replace`），写入前备份原内容。
+11. 写完后用 `KvmVm(logger, vm_json_path)` 构造一次（只做 `Validate`，不执行命令，见 `src/kvm/vm/kvm_vm.py:78-102`）；失败则用备份恢复所有已写文件并返回 `400 VALIDATION_ERROR`。
+12. 失效生成文件（对应目标 7.3）：
     - 根据实际发生变化的字段，取 `data_map.dependencies` 中 artifacts 的并集。
     - 展开模板后删除文件 / 目录（`ciDataDir` 用 `shutil.rmtree`）。
     - 具体删除项通过 `data_map.json` 驱动，不在代码里硬编码。
-12. 一致性兜底：
+13. 一致性兜底：
     - managed VM 使用 `virsh create` 创建瞬态域，`stop` 后域已不存在，无需额外操作。
     - 若 `_get_virsh_state(name)` 返回 `Stopped`，说明域是持久化的且仍留在 `virsh list --name --all` 中；此时执行一次 `virsh undefine <name>`（通过现有 `Util.run_command`），确保下一次 `POST /start` 走 `create_vm()` 重建 XML 的路径。
-13. 返回结果。
+14. 返回结果。
 
 #### 6.4 成功响应
 
@@ -439,7 +444,8 @@ Content-Type: application/json
 
 ### 8. 边界情况
 
-- **VM 正在运行**：直接拒绝，不做 CPU/RAM 热插拔，也不做网桥热迁移；调用方必须先 `POST /stop`。
+- **VM 期望状态为运行中**：直接拒绝，不做 CPU/RAM 热插拔，也不做网桥热迁移；调用方必须先 `POST /stop`。
+- **期望状态与 live 状态漂移**：先用 `KvmVm.Process()` 调和（例如期望 `stopped` 但实际在跑 → 先 destroy；期望 `running` 但实际未跑 → 先启动）。调和完成后，期望 `running` 仍然拒绝 PATCH。
 - **VM 未托管**（virsh 中存在但没有 `data/vm-<name>.json`）：PATCH 返回 `404`，与 GET/DELETE 的 managed 语义一致。
 - **单网卡假设**：`networks` 数组长度必须为 1；多网卡数据返回 `501 NOT_IMPLEMENTED`，message 中写明“当前只实现单网桥 PATCH，VM 实际有 N 个 networks”，不猜测要改哪一块。
 - **`bridge` 与 `bridgeType`**：只接受 managed bridge；`bridgeType` 从 bridge 实体读取，不允许调用方指定。

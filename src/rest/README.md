@@ -180,7 +180,8 @@ PATCH /api/v1/vms/my-vm
 
 约束：
 
-- VM 正在运行（virsh state = running）时返回 `409 VM_RUNNING`。
+- 以数据文件中的期望状态 `vmState` 为准：期望 `running` 时返回 `409 VM_RUNNING`。
+- 期望状态与 live virsh 状态不一致时，先用 `KvmVm.Process()` 调和到一致；调和失败返回 `500 SYSTEM_COMMAND_FAILED`。
 - 非法字段返回 `400 INVALID_PATCH_FIELD`，并在 `error.details` 中返回 PATCH schema 白名单。
 - 当前只支持单网卡；VM 的 `networks` 数组长度不为 1 时返回 `501 NOT_IMPLEMENTED`。
 - 修改后会删除 `vm_def_*.xml`、`cloud_init.iso`、`ci_data/` 等生成文件，下次 `POST /start` 时按新数据重建。磁盘镜像和 `data/**` 不会被删除。
