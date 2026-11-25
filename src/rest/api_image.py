@@ -190,7 +190,8 @@ def _create_image(id: str, data: dict):
     """
     logger = _get_logger()
 
-    # If imageSource is "local", verify baseImagePath exists.
+    # If imageSource is "local", either baseImagePath must exist (overlay image),
+    # or sizeInGB must be given (blank image).
     if data.get("imageSource") == "local":
         base = data.get("baseImagePath", "")
         if base:
@@ -203,11 +204,14 @@ def _create_image(id: str, data: dict):
                               "message": f"baseImagePath does not exist: {base}"}
                 }), 400
         else:
-            return jsonify({
-                "success": False,
-                "error": {"code": "VALIDATION_ERROR",
-                          "message": "imageSource 'local' requires 'baseImagePath'"}
-            }), 400
+            size = data.get("sizeInGB")
+            if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                return jsonify({
+                    "success": False,
+                    "error": {"code": "VALIDATION_ERROR",
+                              "message": "imageSource 'local' requires 'baseImagePath' "
+                                         "or a positive integer 'sizeInGB' for a blank image"}
+                }), 400
 
     # If imagePath is not specified, auto-generate relative to imageDataDir.
     if "imagePath" not in data:
