@@ -16,7 +16,7 @@ _API_SCHEMA = {
             "description": "Virtual machine lifecycle management",
             "endpoints": {
                 "GET /api/v1/vms": "List all VMs (managed + virsh-only)",
-                "POST /api/v1/vms": "Create or update a VM. Body: id*, cpu*, ramInGB*, vmHostName*, osImage*, osVariant*, bridge*; optional: ipv4, gateway4, diskSizeGB, authType, customerPWD, customerKeys, shareInventoryData, prepareDomainImage",
+                "POST /api/v1/vms": "Create or update a VM. Body: id*, cpu*, ramInGB*, vmHostName* (only when useCloudInit=true), osImage*, osVariant*, bridge*; optional: useCloudInit (default true), ipv4, gateway4, diskSizeGB, authType, customerPWD, customerKeys, shareInventoryData, prepareDomainImage. With useCloudInit=false, vmHostName/ipv4/gateway4/authType/customerPWD/customerKeys/shareInventoryData/prepareDomainImage are rejected",
                 "GET /api/v1/vms/<name>": "Get VM details (virsh state, disk/net JSONs, inventory with timestamps). Unmanaged VMs return minimal info.",
                 "PATCH /api/v1/vms/<name>": "Partially update a stopped VM. Allowed fields: cpu, ramInGB, bridge. See /api/v1/schema for the full PATCH schema.",
                 "DELETE /api/v1/vms/<name>": "Delete VM (managed: destroy+remove dir; unmanaged: virsh destroy+undefine)",
