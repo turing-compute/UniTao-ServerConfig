@@ -34,7 +34,8 @@ from shared.utilities import Util
 console_bp = Blueprint("console", __name__)
 
 VNC_BASE_PORT = 5900
-DEFAULT_NOVNC_DIR = "/usr/share/novnc"
+# Installed by `apt install novnc` (src/kvm_install.sh); deploy-service.sh checks it.
+NOVNC_DIR = "/usr/share/novnc"
 DEFAULT_PORT_MIN = 6080
 DEFAULT_PORT_MAX = 6099
 # Seconds a freshly started websockify waits for the page to connect before exiting.
@@ -59,10 +60,6 @@ def _get_config() -> dict:
 
 def _error(code: str, message: str, status: int):
     return jsonify({"success": False, "error": {"code": code, "message": message}}), status
-
-
-def _novnc_dir() -> str:
-    return _get_config().get("noVncDir", DEFAULT_NOVNC_DIR)
 
 
 def _port_range() -> tuple:
@@ -204,17 +201,16 @@ def open_console(name: str):
 def console_page(name: str):
     if not _NAME_RE.match(name):
         return _error("VALIDATION_ERROR", f"Invalid VM name '{name}'", 400)
-    if not os.path.isfile(os.path.join(_novnc_dir(), "core", "rfb.js")):
+    if not os.path.isfile(os.path.join(NOVNC_DIR, "core", "rfb.js")):
         return _error("CONSOLE_UNAVAILABLE",
-                      f"noVNC not found in '{_novnc_dir()}' (apt install novnc, "
-                      "or set noVncDir in config)", 503)
+                      f"noVNC not found in '{NOVNC_DIR}' (apt install novnc)", 503)
     return Response(_PAGE.replace("{{VM_NAME}}", name), mimetype="text/html")
 
 
 @console_bp.route("/console/novnc/<path:filename>", methods=["GET"])
 def novnc_static(filename: str):
     # send_from_directory refuses paths that escape the directory.
-    response = send_from_directory(_novnc_dir(), filename)
+    response = send_from_directory(NOVNC_DIR, filename)
     if filename.endswith(".js"):
         # ES modules need a JavaScript MIME type; some hosts map .js to text/plain.
         response.mimetype = "text/javascript"

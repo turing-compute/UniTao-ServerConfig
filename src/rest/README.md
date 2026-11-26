@@ -298,7 +298,7 @@ websockify --run-once --timeout 30 <port> 127.0.0.1:<vncPort>
 - VM 的 VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`），局域网无法直接连 5900，只能经控制台进入；也可以用 SSH 隧道：`ssh -L 5900:localhost:5900 <user>@<host>`。该设置在 VM 下次启动时生效，已在运行的 VM 仍保持原监听地址。
 - 防火墙需放行 REST 端口（5000）和控制台端口段（默认 6080–6099/tcp）。
 
-依赖（`src/kvm_install.sh` 已包含）：
+依赖（`src/kvm_install.sh` 已包含，部署时自动安装；noVNC 固定从 `/usr/share/novnc` 加载）：
 
 ```bash
 sudo apt-get install -y novnc websockify
@@ -306,7 +306,6 @@ sudo apt-get install -y novnc websockify
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `noVncDir` | `/usr/share/novnc` | noVNC 静态文件目录（需包含 `core/rfb.js`） |
 | `consolePortMin` | `6080` | websockify 端口段起点 |
 | `consolePortMax` | `6099` | websockify 端口段终点（同时打开的控制台数上限） |
 

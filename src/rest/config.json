@@ -9,7 +9,6 @@
     "bridgeDataDir": "/opt/kvm/network",
     "defaultBridge": "br0",
     "defaultRamInGB": 2,
-    "noVncDir": "/usr/share/novnc",
     "consolePortMin": 6080,
     "consolePortMax": 6099,
     "hostKeyDir": "/opt/run/UniTao-ServerConfig/keys",
