@@ -548,7 +548,9 @@ class KvmVm:
             # instead of looping back into the installer.
             vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom")
             vm_create_cmd.append(f"  --boot hd,cdrom")
-        vm_create_cmd.append(f"  --graphics vnc,listen=0.0.0.0")
+        # VNC only on loopback: reach it through the REST web console
+        # (GET /api/v1/vms/<name>/console) or an SSH tunnel.
+        vm_create_cmd.append(f"  --graphics vnc,listen=127.0.0.1")
         return vm_create_cmd
     
     def vm_running(self) -> bool:

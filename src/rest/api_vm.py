@@ -21,6 +21,7 @@ from rest.schema_loader import (
 from kvm.vm.kvm_vm import KvmVm
 from rest.api_kvm_iso import iso_abs_path
 from rest.api_image import ensure_image_size_gb
+from rest.api_console import close_vm_consoles
 
 vm_bp = Blueprint("vm", __name__)
 
@@ -1140,6 +1141,7 @@ def delete_vm(name: str):
     with _get_vm_lock(name):
         data = read_entity_data(current_app, "vm", name)
 
+        close_vm_consoles(name)
         # Managed VM: full cleanup (virsh destroy + remove data dir).
         if data is not None:
             data["vmState"] = KvmVm.Keyword.VmStates.NotExists
@@ -1217,6 +1219,7 @@ def stop_vm(name: str):
 
         vm = KvmVm(logger, vm_json_path(current_app, name), key_dir=_get_host_key_dir())
         vm.Process()
+        close_vm_consoles(name)
 
         return jsonify({
             "success": True,

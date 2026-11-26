@@ -12,6 +12,8 @@
         "POST   /api/v1/vms/<name>/stop": "Stop VM",
         "POST   /api/v1/vms/<name>/eject-iso": "Detach the install ISO from a stopped VM",
         "POST   /api/v1/vms/<name>/commit": "Commit disk changes to backing image",
+        "GET    /api/v1/vms/<name>/console": "Web VNC console page (noVNC)",
+        "POST   /api/v1/vms/<name>/console": "Start a one-shot websockify for the console page",
         "GET    /api/v1/vms/<name>/inventory": "List inventory files",
         "GET    /api/v1/vms/<name>/inventory/<file>": "Get inventory file",
         "POST   /api/v1/vms/<name>/inventory": "Upload inventory file",
