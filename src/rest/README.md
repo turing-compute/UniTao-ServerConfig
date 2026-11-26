@@ -92,7 +92,7 @@ POST /api/v1/images/<name>
 
 等待 `downloadState` 变为 `"ready"` 后即可在 VM 创建时引用。
 
-Image 创建完成后，其虚拟磁盘大小（`qemu-img info` 的 `virtual-size`，向上取整到 GB）会记录在 image JSON 的 `sizeInGB` 中；远程下载的 image 也会补上。之前创建、没有 `sizeInGB` 的 image，会在第一次被 VM 引用时探测并写回。
+Image 创建完成后，其虚拟磁盘大小（`qemu-img info` 的 `virtual-size`，向上取整到 GB）会记录在 image JSON 的 `sizeInGB` 中；远程下载的 image 也会补上。之前创建、没有 `sizeInGB` 的 image，会在 `GET /api/v1/images/<name>` 或被 VM 当作 `osImage` 引用时探测并写回（下载中或失败的 image 不探测）。
 
 ---
 

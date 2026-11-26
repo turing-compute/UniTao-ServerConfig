@@ -20,6 +20,7 @@ from rest.schema_loader import (
 )
 from kvm.vm.kvm_vm import KvmVm
 from rest.api_kvm_iso import iso_abs_path
+from rest.api_image import ensure_image_size_gb
 
 vm_bp = Blueprint("vm", __name__)
 
@@ -336,35 +337,6 @@ def _query_virtual_size_gb(image_path: str, logger: logging.Logger) -> int:
         return 20
 
 
-def _base_image_size_gb(image_name: str, image_data: dict, logger: logging.Logger):
-    """Return a managed image's size in GB, or None if it cannot be determined.
-
-    Prefers sizeInGB from the image JSON. Images created before sizes were
-    recorded are probed with qemu-img once and the result is written back.
-    """
-    size = image_data.get("sizeInGB")
-    if isinstance(size, int) and not isinstance(size, bool) and size > 0:
-        return size
-    image_path = image_data.get("imagePath")
-    if not image_path:
-        return None
-    abs_path = image_path if os.path.isabs(image_path) else os.path.normpath(
-        os.path.join(get_data_dir(current_app, "image"), image_path))
-    try:
-        result = Util.run_command(f"qemu-img info --output=json {abs_path}")
-        virtual_bytes = json.loads(result.stdout).get("virtual-size", 0)
-    except Exception as e:
-        logger.warning(f"Cannot query virtual size of image [{image_name}] at [{abs_path}]: {e}")
-        return None
-    if not virtual_bytes:
-        return None
-    size = max(1, (virtual_bytes + 1024**3 - 1) // 1024**3)
-    image_data["sizeInGB"] = size
-    write_entity_data(current_app, "image", image_name, image_data)
-    logger.info(f"Recorded sizeInGB={size} for image [{image_name}]")
-    return size
-
-
 # ── Routes ──
 
 @vm_bp.route("", methods=["GET"])
@@ -597,7 +569,7 @@ def create_vm():
     # ── A disk smaller than its base image would cut off the image's data ──
     base_size_gb = None
     if base_image_data is not None:
-        base_size_gb = _base_image_size_gb(os_image, base_image_data, logger)
+        base_size_gb = ensure_image_size_gb(current_app, os_image, base_image_data, logger)
         if disk_size_gb is not None and base_size_gb is not None and disk_size_gb < base_size_gb:
             return jsonify({
                 "success": False,

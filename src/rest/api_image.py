@@ -117,6 +117,43 @@ def _get_qcow2_info(file_path: str, base_dir: str) -> dict:
         return {}
 
 
+def ensure_image_size_gb(app, image_name: str, data: dict, logger: logging.Logger):
+    """Return a managed image's size in GB, recording it in the image JSON if missing.
+
+    Prefers sizeInGB from the JSON. Otherwise the file is probed with
+    qemu-img (virtual-size, GB rounded up) and the value is written back, so
+    images created before sizes were recorded get backfilled on first use.
+    Images still downloading or failed are not probed. Returns None when the
+    size cannot be determined. `data` is updated in place.
+    """
+    size = data.get("sizeInGB")
+    if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+        return size
+    state = data.get("downloadState")
+    if state in ("in-progress", "failed") or isinstance(state, dict):
+        return None
+    image_path = data.get("imagePath")
+    if not image_path:
+        return None
+    abs_path = image_path if os.path.isabs(image_path) else os.path.normpath(
+        os.path.join(get_data_dir(app, "image"), image_path))
+    if not os.path.isfile(abs_path):
+        return None
+    try:
+        result = Util.run_command(f"qemu-img info --output=json {abs_path}")
+        virtual_bytes = json.loads(result.stdout).get("virtual-size", 0)
+    except Exception as e:
+        logger.warning(f"Cannot query virtual size of image [{image_name}] at [{abs_path}]: {e}")
+        return None
+    if not virtual_bytes:
+        return None
+    size = max(1, (virtual_bytes + 1024**3 - 1) // 1024**3)
+    data["sizeInGB"] = size
+    write_entity_data(app, "image", image_name, data)
+    logger.info(f"Recorded sizeInGB={size} for image [{image_name}]")
+    return size
+
+
 def _ensure_json_body():
     """Validate Content-Type and parse JSON body. Returns (data, error_response)."""
     if not request.is_json:
@@ -309,6 +346,9 @@ def get_image(name: str):
     # Check JSON definition first.
     data = read_entity_data(current_app, "image", base_name)
     if data is not None:
+        # Backfill sizeInGB before adding response-only fields, so only the
+        # stored definition (plus sizeInGB) is written back.
+        ensure_image_size_gb(current_app, base_name, data, _get_logger())
         data["id"] = base_name
         data["managed"] = True
         # Convert imagePath to relative if stored as absolute.
