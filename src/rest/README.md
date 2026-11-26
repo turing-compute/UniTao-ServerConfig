@@ -20,6 +20,13 @@
 sudo ./service/deploy-service.sh /etc/unitiao
 ```
 
+部署脚本会用 `src/rest/config.json` 作为模板调和运行时的 `config.json`（由 `service/merge_config.py` 完成）：
+
+- 配置文件不存在时，直接复制模板。
+- 已有配置缺少模板中的配置项（例如升级后新增的 `isoDataDir`）时，会在终端逐项询问，直接回车采用模板默认值；非交互运行时自动采用默认值并打印警告。
+- 模板中没有的配置项会被删除。
+- `hostKeyDir` 和 `hostApiUrl` 总是写为部署脚本检测到的值。
+
 ## API 通用格式
 
 请求和响应均使用 JSON。成功响应:
