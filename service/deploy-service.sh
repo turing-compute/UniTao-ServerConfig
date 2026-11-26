@@ -57,43 +57,17 @@ sudo sed -i "s|{{REPO_ROOT}}|$REPO_ROOT|g" "$DEPLOYED_SERVICE"
 sudo sed -i "s|{{CONFIG_DIR}}|$RUNTIME_DIR|g" "$DEPLOYED_SERVICE"
 echo "Service file installed to $DEPLOYED_SERVICE"
 
-# 4. Copy default config.json if not already present.
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Config not found, copying default..."
-    sudo cp "$DEFAULT_CONFIG" "$CONFIG_FILE"
-    echo "Default config copied to $CONFIG_FILE"
-else
-    echo "Config already exists at $CONFIG_FILE"
-fi
-
-# Ensure hostKeyDir matches the key pair generated in step 2.
-sudo sed -i "s|\"hostKeyDir\": \".*\"|\"hostKeyDir\": \"$KEY_DIR\"|" "$CONFIG_FILE"
-echo "Config hostKeyDir set to $KEY_DIR"
-
-# Ensure hostApiUrl is set to the detected host IP (may be missing from older configs).
-if grep -q '"hostApiUrl"' "$CONFIG_FILE"; then
-    sudo sed -i "s|\"hostApiUrl\": \".*\"|\"hostApiUrl\": \"$HOST_API_URL\"|" "$CONFIG_FILE"
-    echo "Config hostApiUrl updated to $HOST_API_URL"
-else
-    sudo sed -i "s|\"hostKeyDir\": \"$KEY_DIR\"|\"hostApiUrl\": \"$HOST_API_URL\",\n  \"hostKeyDir\": \"$KEY_DIR\"|" "$CONFIG_FILE"
-    echo "Config hostApiUrl set to $HOST_API_URL"
-fi
-
-# Remove config attributes not present in the default config template.
-sudo python3 -c "
-import json
-with open('$DEFAULT_CONFIG') as f:
-    template = json.load(f)
-with open('$CONFIG_FILE') as f:
-    target = json.load(f)
-extra = [k for k in target if k not in template]
-for k in extra:
-    del target[k]
-if extra:
-    with open('$CONFIG_FILE', 'w') as f:
-        json.dump(target, f, indent=4)
-    print(f'Removed unrecognized config keys: {extra}')
-"
+# 4. Create or reconcile config.json against the default template:
+#    - missing file → copy the template;
+#    - keys the template has but the config lacks → asked interactively
+#      (Enter accepts the template default; defaults are used without a terminal);
+#    - keys not in the template → removed;
+#    - hostKeyDir / hostApiUrl → always set to the values detected above.
+sudo python3 "$SCRIPT_DIR/merge_config.py" \
+    --template "$DEFAULT_CONFIG" \
+    --config "$CONFIG_FILE" \
+    --set "hostKeyDir=$KEY_DIR" \
+    --set "hostApiUrl=$HOST_API_URL"
 
 # 5. Symlink into systemd.
 echo "Linking into systemd..."
