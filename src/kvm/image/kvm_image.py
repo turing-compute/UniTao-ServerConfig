@@ -128,9 +128,31 @@ class KvmImage:
     def Create(self):
         if os.path.exists(self.ImageData[self.Keyword.ImagePath]):
             self.log.info(f"Image already exists. [{self.ImageData[self.Keyword.ImagePath]}]")
+        else:
+            self.DownloadImage()
+            self.BuildImage()
+        self.RecordSize()
+
+    def RecordSize(self):
+        """Persist the image's virtual size as sizeInGB when the data file lacks it.
+
+        Local images already carry sizeInGB (given, or auto-filled from the backing
+        file); remote downloads do not. Recording it lets VM creation compare a
+        requested disk size against the image without probing the file again.
+        A failed probe is logged, not raised: the image itself is usable.
+        """
+        size = self.ImageData.get(self.Keyword.SizeInGB, None)
+        if isinstance(size, int) and not isinstance(size, bool) and size > 0:
             return
-        self.DownloadImage()
-        self.BuildImage()
+        image_path = self.ImageData[self.Keyword.ImagePath]
+        try:
+            size = self._query_virtual_size_gb(image_path)
+        except Exception as e:
+            self.log.warning(f"Cannot query virtual size for [{image_path}], [{self.Keyword.SizeInGB}] not recorded: {e}")
+            return
+        self.ImageData[self.Keyword.SizeInGB] = size
+        self._save_data()
+        self.log.info(f"Recorded [{self.Keyword.SizeInGB}]={size} for image [{image_path}]")
 
     def DownloadImage(self):
         if self.ImageData[self.Keyword.ImageSource] != self.Keyword.Source.Remote:
@@ -171,7 +193,7 @@ class KvmImage:
         result = Util.run_command(cmd)
         info = json.loads(result.stdout)
         virtual_size_bytes = info.get("virtual-size", 0)
-        return (virtual_size_bytes + 1024**3 - 1) // 1024**3
+        return max(1, (virtual_size_bytes + 1024**3 - 1) // 1024**3)
 
     def _save_data(self):
         """Persist current ImageData back to the JSON data file.

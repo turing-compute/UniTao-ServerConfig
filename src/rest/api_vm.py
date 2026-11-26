@@ -203,7 +203,7 @@ def _restore_files(backups: dict, logger: logging.Logger):
 # ── JSON generators (POST params → definition files per vm_data_sample.json) ──
 
 def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: logging.Logger,
-                    disk_size_gb: int = None) -> dict:
+                    disk_size_gb: int = None, base_size_gb: int = None) -> dict:
     """Generate a disk JSON that references an existing managed image as backing file."""
     base_image_path_rel = base_image_data.get("imagePath", "")
     image_format = base_image_data.get("imageFormat", "qcow2")
@@ -217,9 +217,11 @@ def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: lo
         image_data_dir = get_data_dir(current_app, "image")
         abs_base_path = os.path.normpath(os.path.join(image_data_dir, base_image_path_rel))
 
-    # Use explicit diskSizeGB if provided, otherwise query base image virtual size.
+    # Use explicit diskSizeGB if provided, otherwise the base image size.
     if disk_size_gb is not None and disk_size_gb > 0:
         size_gb = disk_size_gb
+    elif base_size_gb is not None:
+        size_gb = base_size_gb
     else:
         size_gb = 20  # fallback default
         if abs_base_path is not None and os.path.exists(abs_base_path):
@@ -332,6 +334,35 @@ def _query_virtual_size_gb(image_path: str, logger: logging.Logger) -> int:
     except Exception:
         logger.warning(f"Cannot query virtual size for [{image_path}], using fallback")
         return 20
+
+
+def _base_image_size_gb(image_name: str, image_data: dict, logger: logging.Logger):
+    """Return a managed image's size in GB, or None if it cannot be determined.
+
+    Prefers sizeInGB from the image JSON. Images created before sizes were
+    recorded are probed with qemu-img once and the result is written back.
+    """
+    size = image_data.get("sizeInGB")
+    if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+        return size
+    image_path = image_data.get("imagePath")
+    if not image_path:
+        return None
+    abs_path = image_path if os.path.isabs(image_path) else os.path.normpath(
+        os.path.join(get_data_dir(current_app, "image"), image_path))
+    try:
+        result = Util.run_command(f"qemu-img info --output=json {abs_path}")
+        virtual_bytes = json.loads(result.stdout).get("virtual-size", 0)
+    except Exception as e:
+        logger.warning(f"Cannot query virtual size of image [{image_name}] at [{abs_path}]: {e}")
+        return None
+    if not virtual_bytes:
+        return None
+    size = max(1, (virtual_bytes + 1024**3 - 1) // 1024**3)
+    image_data["sizeInGB"] = size
+    write_entity_data(current_app, "image", image_name, image_data)
+    logger.info(f"Recorded sizeInGB={size} for image [{image_name}]")
+    return size
 
 
 # ── Routes ──
@@ -563,6 +594,18 @@ def create_vm():
             }), 400
         install_iso_path = iso_abs_path(current_app, iso_data)
 
+    # ── A disk smaller than its base image would cut off the image's data ──
+    base_size_gb = None
+    if base_image_data is not None:
+        base_size_gb = _base_image_size_gb(os_image, base_image_data, logger)
+        if disk_size_gb is not None and base_size_gb is not None and disk_size_gb < base_size_gb:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"'diskSizeGB' ({disk_size_gb}) is smaller than osImage "
+                                     f"'{os_image}' size ({base_size_gb} GB)"}
+            }), 400
+
     # ── Resolve referenced bridge ──
     bridge_data = read_entity_data(current_app, "bridge", bridge_name)
     if bridge_data is None:
@@ -581,7 +624,8 @@ def create_vm():
     # ── Generate definition files ──
     # Disk JSON (named after the base image).
     if base_image_data is not None:
-        disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger, disk_size_gb)
+        disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger, disk_size_gb,
+                                   base_size_gb=base_size_gb)
         disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
     else:
         disk_json = _gen_blank_disk_json(vm_id, vm_root, disk_size_gb)
