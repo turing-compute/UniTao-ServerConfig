@@ -19,6 +19,7 @@ from rest.schema_loader import (
     artifact_paths_for_changes, remove_artifacts,
 )
 from kvm.vm.kvm_vm import KvmVm
+from rest.api_kvm_iso import iso_abs_path
 
 vm_bp = Blueprint("vm", __name__)
 
@@ -245,6 +246,22 @@ def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: lo
     }
 
 
+def _gen_blank_disk_json(vm_name: str, vm_root: str, size_gb: int) -> dict:
+    """Generate a blank qcow2 system disk JSON for an ISO install (no backing image)."""
+    data_dir = os.path.join(vm_root, "data")
+    disk_image_path = os.path.join(vm_root, f"{vm_name}.qcow2")
+    try:
+        image_path_rel = os.path.relpath(disk_image_path, data_dir)
+    except ValueError:
+        image_path_rel = disk_image_path
+    return {
+        "imagePath": image_path_rel,
+        "imageSource": "local",
+        "imageFormat": "qcow2",
+        "sizeInGB": size_gb,
+    }
+
+
 def _gen_net_json(bridge_name: str, bridge_data: dict, static_ip4: str = None, gateway4: str = None,
                   use_cloud_init: bool = True) -> dict:
     """Generate a network interface JSON connected to a managed bridge.
@@ -273,7 +290,8 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
                  vm_host_name: str, vm_root: str,
                  disk_file_name: str, net_file_name: str,
                  auth_type: str = None, customer_pwd: str = None,
-                 customer_keys: list = None, use_cloud_init: bool = True) -> dict:
+                 customer_keys: list = None, use_cloud_init: bool = True,
+                 install_iso: str = None, install_iso_path: str = None) -> dict:
     """Generate the main VM definition JSON per vm_data_sample.json."""
     vm_json = {
         "id": vm_name,
@@ -288,6 +306,9 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "osType": "linux",
         "osVariant": os_variant,
     }
+    if install_iso:
+        vm_json["installIso"] = install_iso
+        vm_json["installIsoPath"] = install_iso_path
     if not use_cloud_init:
         return vm_json
     vm_json["ciIsoPath"] = "{vmPath}/cloud_init.iso"
@@ -363,7 +384,16 @@ def create_vm():
     os_image = data.get("osImage", None)
     os_variant = data.get("osVariant", None)
     bridge_name = data.get("bridge", None) or _get_config().get("defaultBridge", None)
-    use_cloud_init = data.get("useCloudInit", True)
+    install_iso = data.get("installIso", None)
+    # An ISO install has no cloud image to configure, so cloud-init defaults off.
+    use_cloud_init = data.get("useCloudInit", install_iso is None)
+
+    if install_iso is not None and (not isinstance(install_iso, str) or not install_iso):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "'installIso' must be a non-empty string"}
+        }), 400
 
     if not isinstance(use_cloud_init, bool):
         return jsonify({
@@ -372,10 +402,32 @@ def create_vm():
                       "message": "'useCloudInit' must be a boolean"}
         }), 400
 
+    if install_iso is not None:
+        if use_cloud_init:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": "'installIso' is not supported with useCloudInit=true"}
+            }), 400
+        if os_image is not None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": "'osImage' and 'installIso' are mutually exclusive: "
+                                     "an ISO install starts from a blank disk"}
+            }), 400
+        if data.get("diskSizeGB", None) is None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": "'installIso' requires 'diskSizeGB' for the blank system disk"}
+            }), 400
+
     required = [
-        ("id", vm_id), ("cpu", cpu), ("ramInGB", ram_gb),
-        ("osImage", os_image), ("osVariant", os_variant),
+        ("id", vm_id), ("cpu", cpu), ("ramInGB", ram_gb), ("osVariant", os_variant),
     ]
+    if install_iso is None:
+        required.append(("osImage", os_image))
     if use_cloud_init:
         required.append(("vmHostName", vm_host_name))
     for field_name, field_val in required:
@@ -481,20 +533,38 @@ def create_vm():
                           "message": f"'{field_name}' must be a positive integer"}
             }), 400
 
-    # ── Resolve referenced image ──
-    base_image_data = read_entity_data(current_app, "image", os_image)
-    if base_image_data is None:
-        return jsonify({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR",
-                      "message": f"Referenced osImage '{os_image}' not found in managed images"}
-        }), 400
-    if base_image_data.get("downloadState") != "ready":
-        return jsonify({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR",
-                      "message": f"osImage '{os_image}' is not ready (state: {base_image_data.get('downloadState')})"}
-        }), 400
+    # ── Resolve referenced image or install ISO ──
+    base_image_data = None
+    install_iso_path = None
+    if install_iso is None:
+        base_image_data = read_entity_data(current_app, "image", os_image)
+        if base_image_data is None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"Referenced osImage '{os_image}' not found in managed images"}
+            }), 400
+        if base_image_data.get("downloadState") != "ready":
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"osImage '{os_image}' is not ready (state: {base_image_data.get('downloadState')})"}
+            }), 400
+    else:
+        iso_data = read_entity_data(current_app, "kvm_iso", install_iso)
+        if iso_data is None:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"Referenced installIso '{install_iso}' not found in managed kvm_iso"}
+            }), 400
+        if iso_data.get("downloadState") != "ready":
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"installIso '{install_iso}' is not ready (state: {iso_data.get('downloadState')})"}
+            }), 400
+        install_iso_path = iso_abs_path(current_app, iso_data)
 
     # ── Resolve referenced bridge ──
     bridge_data = read_entity_data(current_app, "bridge", bridge_name)
@@ -513,8 +583,12 @@ def create_vm():
 
     # ── Generate definition files ──
     # Disk JSON (named after the base image).
-    disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger, disk_size_gb)
-    disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
+    if install_iso is None:
+        disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger, disk_size_gb)
+        disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
+    else:
+        disk_json = _gen_blank_disk_json(vm_id, vm_root, disk_size_gb)
+        disk_base = vm_id
     disk_file_name = f"disk-{disk_base}.json"
     disk_path = os.path.join(data_dir, disk_file_name)
     with open(disk_path, "w") as f:
@@ -533,7 +607,8 @@ def create_vm():
                            vm_root, disk_file_name, net_file_name,
                            auth_type=auth_type, customer_pwd=customer_pwd,
                            customer_keys=customer_keys,
-                           use_cloud_init=use_cloud_init)
+                           use_cloud_init=use_cloud_init,
+                           install_iso=install_iso, install_iso_path=install_iso_path)
     vm_path = vm_json_path(current_app, vm_id)
     with open(vm_path, "w") as f:
         json.dump(vm_json, f, indent=4)
@@ -544,7 +619,7 @@ def create_vm():
         json.dump(data, f, indent=4)
 
     logger.info(f"Create VM [{vm_id}] cpu={cpu} ram={ram_gb}GB "
-                f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name} "
+                f"image={os_image} iso={install_iso} bridge={bridge_name} os={os_variant} host={vm_host_name} "
                 f"cloudInit={use_cloud_init}")
 
     # ── Process (creates virsh VM) ──
@@ -1133,6 +1208,58 @@ def stop_vm(name: str):
         return jsonify({
             "success": True,
             "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Stopped}
+        })
+
+
+@vm_bp.route("/<name>/eject-iso", methods=["POST"])
+def eject_iso(name: str):
+    """Detach the install ISO from a stopped VM.
+
+    Managed VMs are transient domains rebuilt from the VM JSON on every start,
+    so removing installIso/installIsoPath from the JSON is what detaches the
+    cdrom: the next start boots without it. Idempotent.
+    """
+    logger = _get_logger()
+    with _get_vm_lock(name):
+        vm_data = read_entity_data(current_app, "vm", name)
+        if vm_data is None:
+            return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+
+        install_iso = vm_data.get("installIso")
+        if install_iso is None and "installIsoPath" not in vm_data:
+            return jsonify({
+                "success": True,
+                "data": {"name": name, "ejected": False, "installIso": None}
+            })
+
+        if vm_data.get("vmState") != KvmVm.Keyword.VmStates.Stopped:
+            return _patch_error(
+                "VM_RUNNING",
+                f"VM '{name}' must be stopped before ejecting the ISO "
+                f"(vmState='{vm_data.get('vmState')}')", 409)
+        live_state = _get_virsh_state(name)
+        if live_state == KvmVm.Keyword.VmStates.Running:
+            return _patch_error(
+                "VM_RUNNING", f"VM '{name}' is still running in virsh", 409)
+
+        vm_data.pop("installIso", None)
+        vm_data.pop("installIsoPath", None)
+        _atomic_write_json(vm_json_path(current_app, name), vm_data)
+
+        warnings = []
+        # A persistent (defined) domain would keep the cdrom; drop it so the
+        # next start rebuilds the domain from the VM JSON.
+        if live_state == KvmVm.Keyword.VmStates.Stopped:
+            try:
+                Util.run_command(f"virsh undefine {name}")
+            except SystemError as e:
+                warnings.append(f"Failed to undefine persistent domain '{name}': {e}")
+
+        logger.info("Ejected install ISO [%s] from VM [%s]", install_iso, name)
+        return jsonify({
+            "success": True,
+            "data": {"name": name, "ejected": True, "installIso": install_iso,
+                     "warnings": warnings}
         })
 
 

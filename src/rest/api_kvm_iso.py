@@ -58,7 +58,7 @@ def _validate_name(name: str):
     return None
 
 
-def _abs_iso_path(app, data: dict) -> str:
+def iso_abs_path(app, data: dict) -> str:
     iso_path = data.get(KvmIso.Keyword.IsoPath, "")
     if os.path.isabs(iso_path):
         return iso_path
@@ -95,11 +95,24 @@ def _persist_state(data_file_path: str, download_state, extra: dict = None):
 def _remove_iso_files(app, data: dict, name: str, logger: logging.Logger):
     if not data.get(KvmIso.Keyword.IsoPath):
         return
-    abs_path = _abs_iso_path(app, data)
+    abs_path = iso_abs_path(app, data)
     for path in (abs_path, abs_path + ".tmp"):
         if os.path.exists(path):
             os.remove(path)
             logger.info(f"Removed ISO file [{path}] for [{name}]")
+
+
+def vms_using_iso(app, name: str) -> list:
+    """Names of managed VMs whose JSON still references this ISO (installIso)."""
+    users = []
+    for vm_name in list_entities(app, "vm"):
+        try:
+            vm_data = read_entity_data(app, "vm", vm_name) or {}
+        except Exception:
+            continue
+        if vm_data.get("installIso") == name:
+            users.append(vm_name)
+    return users
 
 
 def recover_stale_kvm_iso(app):
@@ -121,7 +134,7 @@ def recover_stale_kvm_iso(app):
         if not _is_busy(data):
             continue
         if data.get(KvmIso.Keyword.IsoPath):
-            tmp_path = _abs_iso_path(app, data) + ".tmp"
+            tmp_path = iso_abs_path(app, data) + ".tmp"
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
                 logger.info(f"Removed stale temp file [{tmp_path}] for ISO [{name}]")
@@ -205,7 +218,7 @@ def get_iso(name: str):
     if data is not None:
         data["id"] = name
         data["managed"] = True
-        abs_path = _abs_iso_path(current_app, data)
+        abs_path = iso_abs_path(current_app, data)
         data["sizeInBytes"] = os.path.getsize(abs_path) if os.path.isfile(abs_path) else None
         return jsonify({"success": True, "data": data})
 
@@ -316,7 +329,7 @@ def upload_iso(name: str):
     write_entity_data(current_app, "kvm_iso", name, data)
     data_file = get_entity_path(current_app, "kvm_iso", name)
 
-    abs_path = _abs_iso_path(current_app, data)
+    abs_path = iso_abs_path(current_app, data)
     tmp_path = abs_path + ".tmp"
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     expected_size = request.content_length
@@ -363,6 +376,11 @@ def delete_iso(name: str):
     if data is not None:
         if _is_busy(data):
             return _error("CONFLICT", f"ISO '{name}' is still being transferred", 409)
+        users = vms_using_iso(current_app, name)
+        if users:
+            return _error("CONFLICT",
+                          f"ISO '{name}' is attached to VM(s) {users}; "
+                          f"eject it first (POST /api/v1/vms/<vm>/eject-iso)", 409)
         _remove_iso_files(current_app, data, name, logger)
         delete_entity(current_app, "kvm_iso", name)
         logger.info(f"Delete managed ISO [{name}]")
