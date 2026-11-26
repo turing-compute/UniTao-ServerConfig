@@ -37,6 +37,33 @@ echo "Runtime dir: $RUNTIME_DIR"
 echo "Repo root:   $REPO_ROOT"
 echo "Host IP:     $HOST_IP"
 
+# 0. Dependencies — each installer runs only when something it provides is
+#    missing or outdated, so fresh and update deploys both just run this script.
+#    a. System packages (src/kvm_install.sh): any required binary or noVNC missing.
+MISSING_SYS=()
+for cmd in virsh virt-install qemu-img genisoimage brctl ovs-vsctl websockify; do
+    command -v "$cmd" >/dev/null 2>&1 || MISSING_SYS+=("$cmd")
+done
+[ -f /usr/share/novnc/core/rfb.js ] || MISSING_SYS+=("novnc")
+if [ "${#MISSING_SYS[@]}" -gt 0 ]; then
+    echo "Missing system dependencies: ${MISSING_SYS[*]} — running kvm_install.sh"
+    sudo "$REPO_ROOT/src/kvm_install.sh"
+else
+    echo "System dependencies present"
+fi
+
+#    b. Python packages (src/req_install.sh → src/extlib): requirements.txt
+#       changed since the last install, or never installed.
+REQ_FILE="$REPO_ROOT/src/requirements.txt"
+REQ_STAMP="$REPO_ROOT/src/extlib/.requirements.sha256"
+REQ_SHA=$(sha256sum "$REQ_FILE" | cut -d' ' -f1)
+if [ ! -f "$REQ_STAMP" ] || [ "$(cat "$REQ_STAMP")" != "$REQ_SHA" ]; then
+    echo "Python requirements not installed or changed — running req_install.sh"
+    sudo "$REPO_ROOT/src/req_install.sh"
+else
+    echo "Python requirements up to date"
+fi
+
 # 1. Create runtime directory.
 sudo mkdir -p "$RUNTIME_DIR"
 

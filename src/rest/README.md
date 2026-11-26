@@ -2,8 +2,11 @@
 
 ## 安装依赖
 
+部署脚本（见下文）会按需自动安装，一般不用手动运行。手动安装：
+
 ```bash
-./src/req_install.sh
+sudo ./src/kvm_install.sh   # 系统软件包（KVM、OVS、genisoimage、novnc、websockify）
+sudo ./src/req_install.sh   # Python 依赖 → src/extlib/
 ```
 
 ## 手动启动
@@ -20,7 +23,12 @@
 sudo ./service/deploy-service.sh /etc/unitiao
 ```
 
-部署脚本会用 `src/rest/config.json` 作为模板调和运行时的 `config.json`（由 `service/merge_config.py` 完成）：
+全新部署和更新部署都只需运行这一个脚本。它会先按需安装依赖：
+
+- 缺少任一系统依赖（`virsh`、`virt-install`、`qemu-img`、`genisoimage`、`brctl`、`ovs-vsctl`、`websockify`、noVNC）时运行 `src/kvm_install.sh`。
+- `src/requirements.txt` 与上次安装时不同（按 sha256 比较，记录在 `src/extlib/.requirements.sha256`）或从未安装时运行 `src/req_install.sh`。
+
+然后用 `src/rest/config.json` 作为模板调和运行时的 `config.json`（由 `service/merge_config.py` 完成）：
 
 - 配置文件不存在时，直接复制模板。
 - 已有配置缺少模板中的配置项（例如升级后新增的 `isoDataDir`）时，会在终端逐项询问，直接回车采用模板默认值；非交互运行时自动采用默认值并打印警告。

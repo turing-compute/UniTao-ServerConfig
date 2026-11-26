@@ -29,4 +29,10 @@ fi
 
 # use python3 -m pip instead of the bare "pip" command so it does not depend on
 # PATH resolution (which sudo resets) or on the pip binary name
-python3 -m pip install -r ./requirements.txt --target ./extlib/
+# --upgrade so a changed requirements.txt replaces packages already in extlib/
+# (without it pip leaves existing package directories untouched).
+python3 -m pip install --upgrade -r ./requirements.txt --target ./extlib/
+
+# Record what was installed; deploy-service.sh compares this to decide whether to
+# re-run this script.
+sha256sum ./requirements.txt | cut -d' ' -f1 > ./extlib/.requirements.sha256

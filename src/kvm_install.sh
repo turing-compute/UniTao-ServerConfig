@@ -11,12 +11,17 @@ set -e
 #   qemu-utils              qemu-img (local image create/info/commit)
 #   libvirt-clients         virsh; libvirt-daemon-system provides libvirtd
 #   bridge-utils            brctl for linuxBridge; virt-manager pulls in virt-install
+# Refresh the package index first: a fresh host may have none yet.
+apt-get update
 apt-get install -y qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients bridge-utils virt-manager
 
 # enable local user able to manage kvm without sudo
-# need reboot to take effect
-adduser $USER kvm
-adduser $USER libvirt
+# need reboot to take effect. Under sudo, $USER is root, so use the invoking user.
+KVM_USER="${SUDO_USER:-$USER}"
+if [ -n "$KVM_USER" ] && [ "$KVM_USER" != "root" ]; then
+    adduser "$KVM_USER" kvm
+    adduser "$KVM_USER" libvirt
+fi
 
 # install pip and update to latest
 apt-get install -y python3-pip
@@ -34,15 +39,18 @@ apt-get install -y novnc websockify
 # (without this check) would keep going and leave a host that dies later with
 # "No such file or directory: virsh" at VM/image creation time.
 MISSING=()
-for cmd in virsh virt-install qemu-img genisoimage websockify; do
+for cmd in virsh virt-install qemu-img genisoimage brctl ovs-vsctl websockify; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
 done
+if [ ! -f /usr/share/novnc/core/rfb.js ]; then
+    MISSING+=("novnc(/usr/share/novnc/core/rfb.js)")
+fi
 if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "error: KVM toolchain incomplete after install, missing: ${MISSING[*]}" >&2
     echo "A package above failed to install. Fix apt and re-run this script, e.g.:" >&2
     echo "    sudo apt-get update && sudo $0" >&2
     exit 1
 fi
-echo "OK: KVM toolchain present (virsh, virt-install, qemu-img, genisoimage, websockify)."
+echo "OK: KVM toolchain present (virsh, virt-install, qemu-img, genisoimage, brctl, ovs-vsctl, websockify, novnc)."
