@@ -92,6 +92,8 @@ POST /api/v1/images/<name>
 
 等待 `downloadState` 变为 `"ready"` 后即可在 VM 创建时引用。
 
+Image 创建完成后，其虚拟磁盘大小（`qemu-img info` 的 `virtual-size`，向上取整到 GB）会记录在 image JSON 的 `sizeInGB` 中；远程下载的 image 也会补上。之前创建、没有 `sizeInGB` 的 image，会在 `GET /api/v1/images/<name>` 或被 VM 当作 `osImage` 引用时探测并写回（下载中或失败的 image 不探测）。
+
 ---
 
 ## ISO 管理
@@ -187,7 +189,7 @@ POST /api/v1/vms
 | gateway4 | string | 否 | 网关地址 |
 | shareInventoryData | bool | 否 | 注入 inventory_tool.py 和 report_network.py |
 | prepareDomainImage | bool | 否 | 注入 prep_image_for_commit.py |
-| diskSizeGB | int | 否 | 磁盘大小（GB），默认 10 |
+| diskSizeGB | int | 否 | 磁盘大小（GB）。使用 `osImage` 时默认等于该 image 的 `sizeInGB`，且不能小于它（否则 400） |
 | authType | string | 否 | 认证方式，见下方 [VM 认证方式](#vm-认证方式) |
 | customerPWD | string | 否 | authType=CustomerPWD 时必填，明文密码 |
 | customerKeys | list[string] | 否 | authType=CustomerKey 时必填，SSH 公钥列表 |
