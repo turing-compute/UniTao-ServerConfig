@@ -34,6 +34,7 @@ class KvmVm:
         VmPath = "vmPath"
         UseCloudInit = "useCloudInit"
         CIIsoPath = "ciIsoPath"
+        InstallIsoPath = "installIsoPath"
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
         Login = "login"
@@ -165,6 +166,14 @@ class KvmVm:
             if not is_delete:
                 kvm_net = KvmNetwork(net_def_path, use_cloud_init , self.log)
                 self.Networks.append(kvm_net)
+        install_iso_path = self.VmData.get(self.Keyword.InstallIsoPath, None)
+        if install_iso_path is not None and not is_delete:
+            if not isinstance(install_iso_path, str) or not install_iso_path.endswith(".iso"):
+                raise ValueError(f"Invalid [{self.Keyword.InstallIsoPath}]=[{install_iso_path}], expect a .iso file path")
+            real_install_iso_path = self.parse_relative_path(install_iso_path)
+            if not os.path.isfile(real_install_iso_path):
+                raise ValueError(f"[{self.Keyword.InstallIsoPath}] does not exist [{real_install_iso_path}]")
+            self.VmData[self.Keyword.InstallIsoPath] = real_install_iso_path
         os_type = self.VmData.get(self.Keyword.OsType, None)
         if os_type is None:
             raise ValueError(f"Missing field[{self.Keyword.OsType}] in Vm Data")
@@ -532,6 +541,13 @@ class KvmVm:
             vm_create_cmd.append(f"  --network {net.net_cmd()}")
         if self.VmData[self.Keyword.UseCloudInit]:
             vm_create_cmd.append(f"  --disk path={self.VmData[self.Keyword.CIIsoPath]},device=cdrom")
+        install_iso_path = self.VmData.get(self.Keyword.InstallIsoPath, None)
+        if install_iso_path:
+            # Boot the disk first: a blank disk is not bootable so the installer
+            # runs from the ISO; once installed, reboots go straight to the disk
+            # instead of looping back into the installer.
+            vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom")
+            vm_create_cmd.append(f"  --boot hd,cdrom")
         vm_create_cmd.append(f"  --graphics vnc,listen=0.0.0.0")
         return vm_create_cmd
     

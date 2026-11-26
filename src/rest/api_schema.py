@@ -16,12 +16,13 @@ _API_SCHEMA = {
             "description": "Virtual machine lifecycle management",
             "endpoints": {
                 "GET /api/v1/vms": "List all VMs (managed + virsh-only)",
-                "POST /api/v1/vms": "Create or update a VM. Body: id*, cpu*, ramInGB*, vmHostName* (only when useCloudInit=true), osImage*, osVariant*, bridge*; optional: useCloudInit (default true), ipv4, gateway4, diskSizeGB, authType, customerPWD, customerKeys, shareInventoryData, prepareDomainImage. With useCloudInit=false, vmHostName/ipv4/gateway4/authType/customerPWD/customerKeys/shareInventoryData/prepareDomainImage are rejected",
+                "POST /api/v1/vms": "Create or update a VM. Body: id*, cpu*, ramInGB*, vmHostName* (only when useCloudInit=true), osImage* (unless installIso), osVariant*, bridge*; optional: installIso (kvm_iso name; blank system disk, requires diskSizeGB, excludes osImage, useCloudInit defaults to false and true is rejected), useCloudInit (default true), ipv4, gateway4, diskSizeGB, authType, customerPWD, customerKeys, shareInventoryData, prepareDomainImage. With useCloudInit=false, vmHostName/ipv4/gateway4/authType/customerPWD/customerKeys/shareInventoryData/prepareDomainImage are rejected",
                 "GET /api/v1/vms/<name>": "Get VM details (virsh state, disk/net JSONs, inventory with timestamps). Unmanaged VMs return minimal info.",
                 "PATCH /api/v1/vms/<name>": "Partially update a stopped VM. Allowed fields: cpu, ramInGB, bridge. See /api/v1/schema for the full PATCH schema.",
                 "DELETE /api/v1/vms/<name>": "Delete VM (managed: destroy+remove dir; unmanaged: virsh destroy+undefine)",
                 "POST /api/v1/vms/<name>/start": "Start VM (set vmState=running)",
                 "POST /api/v1/vms/<name>/stop": "Stop VM (set vmState=stopped)",
+                "POST /api/v1/vms/<name>/eject-iso": "Detach the install ISO (removes installIso from the VM JSON). VM must be stopped. Idempotent.",
                 "POST /api/v1/vms/<name>/commit": "Commit qcow2 disk changes to backing image. Body: disk (int|string, optional). VM must be stopped+destroyed.",
                 "GET /api/v1/vms/<name>/inventory": "List inventory file names",
                 "GET /api/v1/vms/<name>/inventory/<f>": "Get inventory file with content and timestamp",
@@ -45,7 +46,7 @@ _API_SCHEMA = {
                 "GET /api/v1/kvm_iso/<name>": "Get ISO details (isoSource, downloadState, sizeInBytes, sha256)",
                 "POST /api/v1/kvm_iso/<name>": "Download ISO from URL (async). Body: downloadLink*, sha256 (optional, verified after download)",
                 "PUT /api/v1/kvm_iso/<name>": "Upload ISO as raw body (Content-Type: application/octet-stream, Content-Length required). Query: sha256 (optional, verified)",
-                "DELETE /api/v1/kvm_iso/<name>": "Delete ISO definition and file (409 while transferring)",
+                "DELETE /api/v1/kvm_iso/<name>": "Delete ISO definition and file (409 while transferring or while a VM still references it via installIso)",
             },
         },
         "bridges": {

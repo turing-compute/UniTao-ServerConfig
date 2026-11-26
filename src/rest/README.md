@@ -134,6 +134,7 @@ curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
 - 已存在且 `downloadState` 为 `"ready"` 的 ISO 不能直接覆盖（409 `CONFLICT`），需先 DELETE。
 - `"failed"` 的 ISO 可直接重新 POST/PUT，残留文件会被清理。
 - 传输中（`"in-progress"` 或下载进度对象）的 ISO 不能覆盖或删除（409）。
+- 仍被 VM 引用（`installIso`）的 ISO 不能删除（409），需先对相关 VM 调用 `eject-iso`。
 - 服务重启时，未完成的传输会被标记为 `"failed"` 并清理临时文件。
 
 ---
@@ -149,6 +150,7 @@ curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
 | DELETE | `/api/v1/vms/<name>` | 删除 VM |
 | POST | `/api/v1/vms/<name>/start` | 启动 VM |
 | POST | `/api/v1/vms/<name>/stop` | 停止 VM |
+| POST | `/api/v1/vms/<name>/eject-iso` | 卸载安装 ISO（VM 需已停止） |
 | POST | `/api/v1/vms/<name>/commit` | 将 qcow2 disk 变更提交到 backing image |
 
 ### 创建 VM
@@ -175,10 +177,11 @@ POST /api/v1/vms
 | cpu | int | 是 | vCPU 数量 |
 | ramInGB | int | 是 | 内存（GB） |
 | vmHostName | string | 是* | VM hostname（`useCloudInit=false` 时不可提供） |
-| osImage | string | 是 | Image 名称 |
+| osImage | string | 是* | Image 名称（使用 `installIso` 时不可提供） |
 | osVariant | string | 是 | OS 类型（如 `ubuntu24.04`） |
 | bridge | string | 是 | 网桥名称 |
-| useCloudInit | bool | 否 | 是否使用 cloud-init 启动（默认 true），见下方 [不使用 cloud-init](#不使用-cloud-init) |
+| useCloudInit | bool | 否 | 是否使用 cloud-init 启动（默认 true；提供 `installIso` 时默认 false），见下方 [不使用 cloud-init](#不使用-cloud-init) |
+| installIso | string | 否 | 用 `kvm_iso` 中的 ISO 安装系统，见下方 [从 ISO 安装](#从-iso-安装) |
 | useDHCP4 | bool | 否 | 使用 DHCP（默认 false，需同时提供 ipv4 + gateway4） |
 | ipv4 | string | 否 | 静态 IP（CIDR 格式，如 `192.168.1.100/24`） |
 | gateway4 | string | 否 | 网关地址 |
@@ -209,6 +212,31 @@ POST /api/v1/vms
 - `vmHostName` 不再必填。
 - 以下字段依赖 cloud-init 生效，提供时返回 400 `VALIDATION_ERROR`：`vmHostName`、`ipv4`、`gateway4`、`authType`、`customerPWD`、`customerKeys`、`shareInventoryData=true`、`prepareDomainImage=true`。
 - 网卡 JSON 只记录网桥和 MAC 地址；guest 的 IP 配置、登录凭据、hostname 都需要镜像自身预先配置好（官方 cloud image 默认没有密码/密钥，无法直接登录）。
+
+### 从 ISO 安装
+
+用已就绪的 `kvm_iso` 在空白系统盘上安装系统：
+
+```json
+POST /api/v1/vms
+{
+  "id": "my-vm",
+  "cpu": 2,
+  "ramInGB": 4,
+  "osVariant": "ubuntu24.04",
+  "bridge": "ovs-br0",
+  "installIso": "ubuntu-24.04",
+  "diskSizeGB": 40
+}
+```
+
+- `installIso` 引用的 ISO 必须存在且 `downloadState` 为 `"ready"`。
+- 系统盘为 `diskSizeGB` 大小的空白 qcow2，因此 `diskSizeGB` 必填，`osImage` 不可提供。
+- `useCloudInit` 默认为 false；显式设为 true 返回 400。其余 cloud-init 专用字段的限制同 [不使用 cloud-init](#不使用-cloud-init)。
+- VM 创建后为 `stopped`，`POST /api/v1/vms/<name>/start` 启动后通过 VNC（`--graphics vnc,listen=0.0.0.0`）完成安装。
+- 启动顺序为 `hd,cdrom`：空白盘无法启动，会进入 ISO 安装程序；安装完成重启后直接从系统盘启动，不会再次进入安装程序。
+- 安装完成后，停止 VM 并调用 `POST /api/v1/vms/<name>/eject-iso` 卸载 ISO（从 VM JSON 中移除 `installIso`），之后启动不再挂载光驱。
+- VM 仍引用某个 ISO 时，`DELETE /api/v1/kvm_iso/<name>` 返回 409。
 
 ### VM 认证方式
 

@@ -10,6 +10,7 @@
         "DELETE /api/v1/vms/<name>": "Delete VM",
         "POST   /api/v1/vms/<name>/start": "Start VM",
         "POST   /api/v1/vms/<name>/stop": "Stop VM",
+        "POST   /api/v1/vms/<name>/eject-iso": "Detach the install ISO from a stopped VM",
         "POST   /api/v1/vms/<name>/commit": "Commit disk changes to backing image",
         "GET    /api/v1/vms/<name>/inventory": "List inventory files",
         "GET    /api/v1/vms/<name>/inventory/<file>": "Get inventory file",
@@ -52,7 +53,9 @@
             "vmPath": "Path is derived from vmDataDir/<name>",
             "vmState": "Use POST /start and /stop",
             "useCloudInit": "Cloud-init mode is fixed at creation",
-            "ciIsoPath": "Generated artifact path"
+            "ciIsoPath": "Generated artifact path",
+            "installIso": "Use POST /api/v1/vms/<name>/eject-iso to detach",
+            "installIsoPath": "Derived from the referenced kvm_iso entity"
         }
     }
 }
