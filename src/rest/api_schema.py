@@ -38,14 +38,14 @@ _API_SCHEMA = {
                 "DELETE /api/v1/images/<name>": "Delete image and disk file",
             },
         },
-        "iso": {
+        "kvm_iso": {
             "description": "ISO installation media (read-only, mounted as cdrom; never used as a disk)",
             "endpoints": {
-                "GET /api/v1/iso": "List ISOs (managed + unmanaged .iso files in isoFileDir)",
-                "GET /api/v1/iso/<name>": "Get ISO details (isoSource, downloadState, sizeInBytes, sha256)",
-                "POST /api/v1/iso/<name>": "Download ISO from URL (async). Body: downloadLink*, sha256 (optional, verified after download)",
-                "PUT /api/v1/iso/<name>": "Upload ISO as raw body (Content-Type: application/octet-stream, Content-Length required). Query: sha256 (optional, verified)",
-                "DELETE /api/v1/iso/<name>": "Delete ISO definition and file (409 while transferring)",
+                "GET /api/v1/kvm_iso": "List ISOs (managed + unmanaged .iso files in isoFileDir)",
+                "GET /api/v1/kvm_iso/<name>": "Get ISO details (isoSource, downloadState, sizeInBytes, sha256)",
+                "POST /api/v1/kvm_iso/<name>": "Download ISO from URL (async). Body: downloadLink*, sha256 (optional, verified after download)",
+                "PUT /api/v1/kvm_iso/<name>": "Upload ISO as raw body (Content-Type: application/octet-stream, Content-Length required). Query: sha256 (optional, verified)",
+                "DELETE /api/v1/kvm_iso/<name>": "Delete ISO definition and file (409 while transferring)",
             },
         },
         "bridges": {

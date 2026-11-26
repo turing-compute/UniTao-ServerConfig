@@ -77,8 +77,8 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 
 - **`KvmIso`** — 只读安装介质（`.iso`），以 cdrom 方式挂载到虚拟机，与 `KvmImage` 分开管理，永远不会被当作磁盘或 backing file。
   - `remote`：从 `downloadLink` 下载，可选 `sha256` 校验。
-  - `upload`：文件由 REST `PUT /api/v1/iso/<name>` 流式上传写入。
-- 幂等 — `isoPath` 处文件已存在则跳过。REST 层见 `src/rest/api_iso.py`（`isoDataDir` 存定义 JSON，`isoFileDir` 存 `.iso` 文件）。
+  - `upload`：文件由 REST `PUT /api/v1/kvm_iso/<name>` 流式上传写入。
+- 幂等 — `isoPath` 处文件已存在则跳过。REST 层见 `src/rest/api_kvm_iso.py`（`isoDataDir` 存定义 JSON，`isoFileDir` 存 `.iso` 文件）。
 
 ### 网络桥接 (`src/network/bridge/`)
 

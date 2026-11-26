@@ -8,7 +8,7 @@ _DATA_DIR_KEY = {
     "vm":     "vmDataDir",
     "image":  "imageDataDir",
     "bridge": "bridgeDataDir",
-    "iso":    "isoDataDir",
+    "kvm_iso": "isoDataDir",
 }
 
 DATA_TYPES = list(_DATA_DIR_KEY.keys())

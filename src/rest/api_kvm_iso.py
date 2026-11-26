@@ -1,4 +1,4 @@
-"""REST API for ISO installation media (/api/v1/iso).
+"""REST API for ISO installation media (/api/v1/kvm_iso).
 
 An ISO is read-only install media that a VM can mount as a cdrom. It is kept
 apart from images so it can never be used as a disk or a backing file.
@@ -28,7 +28,7 @@ from rest.service import (
 )
 from kvm.iso.kvm_iso import KvmIso
 
-iso_bp = Blueprint("iso", __name__)
+kvm_iso_bp = Blueprint("kvm_iso", __name__)
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _UPLOAD_CHUNK = 4 * 1024 * 1024
@@ -62,14 +62,14 @@ def _abs_iso_path(app, data: dict) -> str:
     iso_path = data.get(KvmIso.Keyword.IsoPath, "")
     if os.path.isabs(iso_path):
         return iso_path
-    return os.path.normpath(os.path.join(get_data_dir(app, "iso"), iso_path))
+    return os.path.normpath(os.path.join(get_data_dir(app, "kvm_iso"), iso_path))
 
 
 def _default_iso_path(app, name: str) -> str:
     """isoPath stored relative to isoDataDir, same convention as imagePath."""
     abs_path = os.path.join(get_iso_file_dir(app), f"{name}{KvmIso.Extension}")
     try:
-        return os.path.relpath(abs_path, get_data_dir(app, "iso"))
+        return os.path.relpath(abs_path, get_data_dir(app, "kvm_iso"))
     except ValueError:
         return abs_path
 
@@ -102,17 +102,17 @@ def _remove_iso_files(app, data: dict, name: str, logger: logging.Logger):
             logger.info(f"Removed ISO file [{path}] for [{name}]")
 
 
-def recover_stale_iso(app):
+def recover_stale_kvm_iso(app):
     """On startup, mark 'in-progress' downloads/uploads as failed and drop temp files.
 
     A service restart means the worker threads are gone.
     """
     logger = _get_logger()
-    data_dir = get_data_dir(app, "iso")
+    data_dir = get_data_dir(app, "kvm_iso")
     if not os.path.isdir(data_dir):
         return
-    for name in list_entities(app, "iso"):
-        data_file = get_entity_path(app, "iso", name)
+    for name in list_entities(app, "kvm_iso"):
+        data_file = get_entity_path(app, "kvm_iso", name)
         try:
             with open(data_file, "r") as f:
                 data = json.load(f)
@@ -172,9 +172,9 @@ def _check_replaceable(prev: dict, name: str):
 
 # ── Routes ──
 
-@iso_bp.route("", methods=["GET"])
-def list_iso():
-    managed = set(list_entities(current_app, "iso"))
+@kvm_iso_bp.route("", methods=["GET"])
+def list_kvm_iso():
+    managed = set(list_entities(current_app, "kvm_iso"))
     iso_dir = get_iso_file_dir(current_app)
     disk_files = {}
     if os.path.isdir(iso_dir):
@@ -184,7 +184,7 @@ def list_iso():
 
     items = []
     for name in sorted(managed):
-        data = read_entity_data(current_app, "iso", name) or {}
+        data = read_entity_data(current_app, "kvm_iso", name) or {}
         items.append({
             "name": name,
             "managed": True,
@@ -195,13 +195,13 @@ def list_iso():
     for name, f in sorted(disk_files.items()):
         items.append({"name": name, "managed": False, "file": f})
 
-    return jsonify({"success": True, "data": {"iso": items}})
+    return jsonify({"success": True, "data": {"kvm_iso": items}})
 
 
-@iso_bp.route("/<name>", methods=["GET"])
+@kvm_iso_bp.route("/<name>", methods=["GET"])
 def get_iso(name: str):
     name = _strip_ext(name)
-    data = read_entity_data(current_app, "iso", name)
+    data = read_entity_data(current_app, "kvm_iso", name)
     if data is not None:
         data["id"] = name
         data["managed"] = True
@@ -222,12 +222,12 @@ def get_iso(name: str):
     return _error("NOT_FOUND", f"ISO '{name}' not found", 404)
 
 
-@iso_bp.route("/<name>", methods=["POST"])
+@kvm_iso_bp.route("/<name>", methods=["POST"])
 def download_iso(name: str):
     """Download an ISO from a remote URL (async).
 
     Body: {"downloadLink": "https://...", "sha256": "<optional hex digest>"}
-    Poll GET /api/v1/iso/<name> until downloadState is "ready" or "failed".
+    Poll GET /api/v1/kvm_iso/<name> until downloadState is "ready" or "failed".
     """
     logger = _get_logger()
     err = _validate_name(name)
@@ -250,7 +250,7 @@ def download_iso(name: str):
     if sha256 is not None and not KvmIso.is_sha256(sha256):
         return _error("VALIDATION_ERROR", "'sha256' must be 64 hex characters", 400)
 
-    prev = read_entity_data(current_app, "iso", name)
+    prev = read_entity_data(current_app, "kvm_iso", name)
     err = _check_replaceable(prev, name)
     if err:
         return err
@@ -265,13 +265,13 @@ def download_iso(name: str):
     }
     if sha256 is not None:
         data[KvmIso.Keyword.Sha256] = sha256.lower()
-    write_entity_data(current_app, "iso", name, data)
+    write_entity_data(current_app, "kvm_iso", name, data)
     os.makedirs(get_iso_file_dir(current_app), exist_ok=True)
     logger.info(f"Download ISO [{name}] from [{link}] — spawning background thread")
 
     threading.Thread(
         target=_run_iso_download,
-        args=(get_entity_path(current_app, "iso", name), name),
+        args=(get_entity_path(current_app, "kvm_iso", name), name),
         daemon=True,
     ).start()
 
@@ -280,12 +280,12 @@ def download_iso(name: str):
     }}), 200 if prev is not None else 202
 
 
-@iso_bp.route("/<name>", methods=["PUT"])
+@kvm_iso_bp.route("/<name>", methods=["PUT"])
 def upload_iso(name: str):
     """Upload an ISO as the raw request body (streamed to disk, never held in memory).
 
     curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \\
-         'http://host:5000/api/v1/iso/<name>?sha256=<optional hex digest>'
+         'http://host:5000/api/v1/kvm_iso/<name>?sha256=<optional hex digest>'
     """
     logger = _get_logger()
     err = _validate_name(name)
@@ -299,7 +299,7 @@ def upload_iso(name: str):
     if sha256 is not None and not KvmIso.is_sha256(sha256):
         return _error("VALIDATION_ERROR", "'sha256' must be 64 hex characters", 400)
 
-    prev = read_entity_data(current_app, "iso", name)
+    prev = read_entity_data(current_app, "kvm_iso", name)
     err = _check_replaceable(prev, name)
     if err:
         return err
@@ -313,8 +313,8 @@ def upload_iso(name: str):
     }
     if sha256 is not None:
         data[KvmIso.Keyword.Sha256] = sha256.lower()
-    write_entity_data(current_app, "iso", name, data)
-    data_file = get_entity_path(current_app, "iso", name)
+    write_entity_data(current_app, "kvm_iso", name, data)
+    data_file = get_entity_path(current_app, "kvm_iso", name)
 
     abs_path = _abs_iso_path(current_app, data)
     tmp_path = abs_path + ".tmp"
@@ -355,16 +355,16 @@ def upload_iso(name: str):
     }}), 200 if prev is not None else 201
 
 
-@iso_bp.route("/<name>", methods=["DELETE"])
+@kvm_iso_bp.route("/<name>", methods=["DELETE"])
 def delete_iso(name: str):
     logger = _get_logger()
     name = _strip_ext(name)
-    data = read_entity_data(current_app, "iso", name)
+    data = read_entity_data(current_app, "kvm_iso", name)
     if data is not None:
         if _is_busy(data):
             return _error("CONFLICT", f"ISO '{name}' is still being transferred", 409)
         _remove_iso_files(current_app, data, name, logger)
-        delete_entity(current_app, "iso", name)
+        delete_entity(current_app, "kvm_iso", name)
         logger.info(f"Delete managed ISO [{name}]")
         return jsonify({"success": True, "data": {"name": name, "deleted": True}})
 
