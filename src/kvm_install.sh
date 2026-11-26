@@ -26,12 +26,15 @@ apt-get install -y genisoimage
 
 apt-get install -y openvswitch-switch
 
+# noVNC + websockify for the REST web VNC console (GET /api/v1/vms/<name>/console)
+apt-get install -y novnc websockify
+
 # Verify every binary UniTao shells out to is now on PATH. The first apt-get line is
 # a single transaction: if one package fails, apt installs NONE of them yet the script
 # (without this check) would keep going and leave a host that dies later with
 # "No such file or directory: virsh" at VM/image creation time.
 MISSING=()
-for cmd in virsh virt-install qemu-img genisoimage; do
+for cmd in virsh virt-install qemu-img genisoimage websockify; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
@@ -42,4 +45,4 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "    sudo apt-get update && sudo $0" >&2
     exit 1
 fi
-echo "OK: KVM toolchain present (virsh, virt-install, qemu-img, genisoimage)."
+echo "OK: KVM toolchain present (virsh, virt-install, qemu-img, genisoimage, websockify)."

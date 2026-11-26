@@ -154,6 +154,8 @@ curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
 | POST | `/api/v1/vms/<name>/stop` | 停止 VM |
 | POST | `/api/v1/vms/<name>/eject-iso` | 卸载安装 ISO（VM 需已停止） |
 | POST | `/api/v1/vms/<name>/commit` | 将 qcow2 disk 变更提交到 backing image |
+| GET | `/api/v1/vms/<name>/console` | 网页 VNC 控制台（浏览器打开） |
+| POST | `/api/v1/vms/<name>/console` | 为控制台页面启动一次性 websockify（页面自动调用） |
 
 ### 创建 VM
 
@@ -260,10 +262,47 @@ POST /api/v1/vms
 
 - `installIso` 引用的 ISO 必须存在且 `downloadState` 为 `"ready"`。
 - `useCloudInit` 默认为 false；显式设为 true 返回 400。其余 cloud-init 专用字段的限制同 [不使用 cloud-init](#不使用-cloud-init)。
-- VM 创建后为 `stopped`，`POST /api/v1/vms/<name>/start` 启动后通过 VNC（`--graphics vnc,listen=0.0.0.0`）完成安装。
+- VM 创建后为 `stopped`，`POST /api/v1/vms/<name>/start` 启动后，在浏览器打开 [网页控制台](#网页控制台) `http://<host>:5000/api/v1/vms/<name>/console` 完成安装。
 - 启动顺序为 `hd,cdrom`：空白盘无法启动，会进入 ISO 安装程序；安装完成重启后直接从系统盘启动，不会再次进入安装程序。
 - 安装完成后，停止 VM 并调用 `POST /api/v1/vms/<name>/eject-iso` 卸载 ISO（从 VM JSON 中移除 `installIso`），之后启动不再挂载光驱。
 - VM 仍引用某个 ISO 时，`DELETE /api/v1/kvm_iso/<name>` 返回 409。
+
+### 网页控制台
+
+在浏览器打开：
+
+```
+http://<host>:5000/api/v1/vms/<name>/console
+```
+
+页面由 REST 提供（noVNC），打开后自动调用 `POST /api/v1/vms/<name>/console`，REST 在 `consolePortMin`–`consolePortMax`（默认 6080–6099）中挑一个空闲端口启动：
+
+```
+websockify --run-once --timeout 30 <port> 127.0.0.1:<vncPort>
+```
+
+页面再通过 WebSocket 连到该端口。
+
+- **一个页面一个进程**：`--run-once` 只代理一个 WebSocket 连接，连接断开（关闭页面、刷新、浏览器崩溃、断网）进程即退出；30 秒内没人连上也会退出。VM `stop` / `DELETE` 时会杀掉该 VM 仍在运行的控制台进程。
+- 刷新页面或点 **Reconnect** 会开一个新会话；网络闪断后不会自动重连。
+- 工具栏的 **Ctrl+Alt+Del** 按钮把组合键发给 VM。
+- VM 必须在运行（否则 409 `VM_NOT_RUNNING`）。
+- VM 的 VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`），局域网无法直接连 5900，只能经控制台进入；也可以用 SSH 隧道：`ssh -L 5900:localhost:5900 <user>@<host>`。该设置在 VM 下次启动时生效，已在运行的 VM 仍保持原监听地址。
+- 防火墙需放行 REST 端口（5000）和控制台端口段（默认 6080–6099/tcp）。
+
+依赖（`src/kvm_install.sh` 已包含）：
+
+```bash
+sudo apt-get install -y novnc websockify
+```
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `noVncDir` | `/usr/share/novnc` | noVNC 静态文件目录（需包含 `core/rfb.js`） |
+| `consolePortMin` | `6080` | websockify 端口段起点 |
+| `consolePortMax` | `6099` | websockify 端口段终点（同时打开的控制台数上限） |
+
+未安装 websockify / noVNC 或端口用尽时返回 503 `CONSOLE_UNAVAILABLE`。
 
 ### VM 认证方式
 

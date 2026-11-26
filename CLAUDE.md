@@ -61,6 +61,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
   6. Cloud-Init 支持：生成 `user-data`、`meta-data` 和 `network-config` YAML 文件，通过 `genisoimage` 打包成 `cidata` ISO 文件，并作为 cdrom 挂载。同时将虚拟机 JSON 和网络 JSON 包含在 ISO 中以便自文档化。
   7. `hostCPU` 关键字：当存在且为 `true` 时，向 virt-install 添加 `--cpu host` 以启用 CPU 直通模式。
   8. `installIsoPath` 关键字：挂载安装 ISO 为 cdrom，并设置启动顺序 `--boot hd,cdrom`（空白盘不可启动时进入安装程序，装好后直接从硬盘启动）。REST 层通过 `installIso` 引用 `kvm_iso` 实体，`POST /vms/<name>/eject-iso` 卸载。
+  9. VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`）。网页控制台见 `src/rest/api_console.py`：`GET /api/v1/vms/<name>/console` 提供 noVNC 页面，页面 `POST` 同一路径时启动一次性 `websockify --run-once`（连接断开即退出），VM stop/delete 时清理。
 
 - **`KvmNetwork`** — 虚拟机网络接口配置。支持两种接口类型：
   - `bridge`：连接到 Linux 网桥或 OVS 网桥。OVS 网桥会添加 `virtualport_type=openvswitch`。
