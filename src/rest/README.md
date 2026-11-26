@@ -123,10 +123,11 @@ POST /api/v1/vms
 | id | string | 是 | VM 唯一标识 |
 | cpu | int | 是 | vCPU 数量 |
 | ramInGB | int | 是 | 内存（GB） |
-| vmHostName | string | 是 | VM hostname |
+| vmHostName | string | 是* | VM hostname（`useCloudInit=false` 时不可提供） |
 | osImage | string | 是 | Image 名称 |
 | osVariant | string | 是 | OS 类型（如 `ubuntu24.04`） |
 | bridge | string | 是 | 网桥名称 |
+| useCloudInit | bool | 否 | 是否使用 cloud-init 启动（默认 true），见下方 [不使用 cloud-init](#不使用-cloud-init) |
 | useDHCP4 | bool | 否 | 使用 DHCP（默认 false，需同时提供 ipv4 + gateway4） |
 | ipv4 | string | 否 | 静态 IP（CIDR 格式，如 `192.168.1.100/24`） |
 | gateway4 | string | 否 | 网关地址 |
@@ -136,6 +137,27 @@ POST /api/v1/vms
 | authType | string | 否 | 认证方式，见下方 [VM 认证方式](#vm-认证方式) |
 | customerPWD | string | 否 | authType=CustomerPWD 时必填，明文密码 |
 | customerKeys | list[string] | 否 | authType=CustomerKey 时必填，SSH 公钥列表 |
+
+### 不使用 cloud-init
+
+设置 `"useCloudInit": false` 时，VM 直接从磁盘启动，不生成、不挂载 cloud-init ISO：
+
+```json
+POST /api/v1/vms
+{
+  "id": "my-vm",
+  "cpu": 2,
+  "ramInGB": 2,
+  "osImage": "my-prebuilt-image",
+  "osVariant": "ubuntu24.04",
+  "bridge": "ovs-br0",
+  "useCloudInit": false
+}
+```
+
+- `vmHostName` 不再必填。
+- 以下字段依赖 cloud-init 生效，提供时返回 400 `VALIDATION_ERROR`：`vmHostName`、`ipv4`、`gateway4`、`authType`、`customerPWD`、`customerKeys`、`shareInventoryData=true`、`prepareDomainImage=true`。
+- 网卡 JSON 只记录网桥和 MAC 地址；guest 的 IP 配置、登录凭据、hostname 都需要镜像自身预先配置好（官方 cloud image 默认没有密码/密钥，无法直接登录）。
 
 ### VM 认证方式
 

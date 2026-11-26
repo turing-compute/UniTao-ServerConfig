@@ -245,16 +245,23 @@ def _gen_disk_json(vm_name: str, base_image_data: dict, vm_root: str, logger: lo
     }
 
 
-def _gen_net_json(bridge_name: str, bridge_data: dict, static_ip4: str = None, gateway4: str = None) -> dict:
-    """Generate a network interface JSON connected to a managed bridge."""
-    use_dhcp = static_ip4 is None
+def _gen_net_json(bridge_name: str, bridge_data: dict, static_ip4: str = None, gateway4: str = None,
+                  use_cloud_init: bool = True) -> dict:
+    """Generate a network interface JSON connected to a managed bridge.
+
+    Without cloud-init the guest configures its own network, so only the
+    bridge attachment and a stable MAC address are recorded.
+    """
     net = {
         "ifaceType": "bridge",
         "bridgeName": bridge_name,
         "bridgeType": bridge_data.get("bridgeType", "linuxBridge"),
         "macAddress": _random_mac(),
-        "useDHCP4": use_dhcp,
     }
+    if not use_cloud_init:
+        return net
+    use_dhcp = static_ip4 is None
+    net["useDHCP4"] = use_dhcp
     if not use_dhcp:
         net["ip4"] = static_ip4
         if gateway4:
@@ -266,7 +273,7 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
                  vm_host_name: str, vm_root: str,
                  disk_file_name: str, net_file_name: str,
                  auth_type: str = None, customer_pwd: str = None,
-                 customer_keys: list = None) -> dict:
+                 customer_keys: list = None, use_cloud_init: bool = True) -> dict:
     """Generate the main VM definition JSON per vm_data_sample.json."""
     vm_json = {
         "id": vm_name,
@@ -277,12 +284,14 @@ def _gen_vm_json(vm_name: str, cpu: int, ram_gb: int, os_variant: str,
         "disks": ["{vmPath}/data/" + disk_file_name],
         "networks": ["{vmPath}/data/" + net_file_name],
         "vmState": "stopped",
-        "useCloudInit": True,
-        "ciIsoPath": "{vmPath}/cloud_init.iso",
-        "vmHostName": vm_host_name,
+        "useCloudInit": use_cloud_init,
         "osType": "linux",
         "osVariant": os_variant,
     }
+    if not use_cloud_init:
+        return vm_json
+    vm_json["ciIsoPath"] = "{vmPath}/cloud_init.iso"
+    vm_json["vmHostName"] = vm_host_name
     if auth_type:
         vm_json["authType"] = auth_type
     if customer_pwd:
@@ -354,12 +363,21 @@ def create_vm():
     os_image = data.get("osImage", None)
     os_variant = data.get("osVariant", None)
     bridge_name = data.get("bridge", None) or _get_config().get("defaultBridge", None)
+    use_cloud_init = data.get("useCloudInit", True)
+
+    if not isinstance(use_cloud_init, bool):
+        return jsonify({
+            "success": False,
+            "error": {"code": "VALIDATION_ERROR",
+                      "message": "'useCloudInit' must be a boolean"}
+        }), 400
 
     required = [
         ("id", vm_id), ("cpu", cpu), ("ramInGB", ram_gb),
-        ("vmHostName", vm_host_name), ("osImage", os_image),
-        ("osVariant", os_variant),
+        ("osImage", os_image), ("osVariant", os_variant),
     ]
+    if use_cloud_init:
+        required.append(("vmHostName", vm_host_name))
     for field_name, field_val in required:
         if field_val is None:
             return jsonify({
@@ -384,6 +402,25 @@ def create_vm():
     customer_keys = data.get("customerKeys", None)
     share_inv = data.get("shareInventoryData", False)
     prepare_domain_image = data.get("prepareDomainImage", False)
+
+    # ── Reject cloud-init-only fields when cloud-init is disabled ──
+    # These only take effect through the cloud-init ISO; silently ignoring
+    # them would leave the caller with a VM that differs from the request.
+    if not use_cloud_init:
+        ci_only = [
+            ("vmHostName", vm_host_name), ("ipv4", ipv4), ("gateway4", gateway4),
+            ("authType", auth_type), ("customerPWD", customer_pwd),
+            ("customerKeys", customer_keys),
+            ("shareInventoryData", share_inv or None),
+            ("prepareDomainImage", prepare_domain_image or None),
+        ]
+        given = [name for name, val in ci_only if val is not None]
+        if given:
+            return jsonify({
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR",
+                          "message": f"Fields {given} require cloud-init and are not allowed when useCloudInit=false"}
+            }), 400
 
     # ── Validate authType ──
     if auth_type is not None:
@@ -484,7 +521,8 @@ def create_vm():
         json.dump(disk_json, f, indent=4)
 
     # Network JSON (named after the bridge).
-    net_json = _gen_net_json(bridge_name, bridge_data, ipv4, gateway4)
+    net_json = _gen_net_json(bridge_name, bridge_data, ipv4, gateway4,
+                             use_cloud_init=use_cloud_init)
     net_file_name = f"net-{bridge_name}.json"
     net_path = os.path.join(data_dir, net_file_name)
     with open(net_path, "w") as f:
@@ -494,7 +532,8 @@ def create_vm():
     vm_json = _gen_vm_json(vm_id, cpu, ram_gb, os_variant, vm_host_name,
                            vm_root, disk_file_name, net_file_name,
                            auth_type=auth_type, customer_pwd=customer_pwd,
-                           customer_keys=customer_keys)
+                           customer_keys=customer_keys,
+                           use_cloud_init=use_cloud_init)
     vm_path = vm_json_path(current_app, vm_id)
     with open(vm_path, "w") as f:
         json.dump(vm_json, f, indent=4)
@@ -505,7 +544,8 @@ def create_vm():
         json.dump(data, f, indent=4)
 
     logger.info(f"Create VM [{vm_id}] cpu={cpu} ram={ram_gb}GB "
-                f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name}")
+                f"image={os_image} bridge={bridge_name} os={os_variant} host={vm_host_name} "
+                f"cloudInit={use_cloud_init}")
 
     # ── Process (creates virsh VM) ──
     vm = KvmVm(logger, vm_path, key_dir=_get_host_key_dir(),
