@@ -409,18 +409,15 @@ def create_vm():
                 "error": {"code": "VALIDATION_ERROR",
                           "message": "'installIso' is not supported with useCloudInit=true"}
             }), 400
-        if os_image is not None:
+        # Without osImage the system disk is a standalone blank disk and needs a
+        # size. With osImage (typically a blank base image) the disk is an overlay,
+        # so the install can later be committed back into that image.
+        if os_image is None and data.get("diskSizeGB", None) is None:
             return jsonify({
                 "success": False,
                 "error": {"code": "VALIDATION_ERROR",
-                          "message": "'osImage' and 'installIso' are mutually exclusive: "
-                                     "an ISO install starts from a blank disk"}
-            }), 400
-        if data.get("diskSizeGB", None) is None:
-            return jsonify({
-                "success": False,
-                "error": {"code": "VALIDATION_ERROR",
-                          "message": "'installIso' requires 'diskSizeGB' for the blank system disk"}
+                          "message": "'installIso' without 'osImage' requires 'diskSizeGB' "
+                                     "for the blank system disk"}
             }), 400
 
     required = [
@@ -536,7 +533,7 @@ def create_vm():
     # ── Resolve referenced image or install ISO ──
     base_image_data = None
     install_iso_path = None
-    if install_iso is None:
+    if os_image is not None:
         base_image_data = read_entity_data(current_app, "image", os_image)
         if base_image_data is None:
             return jsonify({
@@ -550,7 +547,7 @@ def create_vm():
                 "error": {"code": "VALIDATION_ERROR",
                           "message": f"osImage '{os_image}' is not ready (state: {base_image_data.get('downloadState')})"}
             }), 400
-    else:
+    if install_iso is not None:
         iso_data = read_entity_data(current_app, "kvm_iso", install_iso)
         if iso_data is None:
             return jsonify({
@@ -583,7 +580,7 @@ def create_vm():
 
     # ── Generate definition files ──
     # Disk JSON (named after the base image).
-    if install_iso is None:
+    if base_image_data is not None:
         disk_json = _gen_disk_json(vm_id, base_image_data, vm_root, logger, disk_size_gb)
         disk_base = os.path.splitext(os.path.basename(base_image_data.get("imagePath", os_image)))[0]
     else:

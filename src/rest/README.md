@@ -177,7 +177,7 @@ POST /api/v1/vms
 | cpu | int | 是 | vCPU 数量 |
 | ramInGB | int | 是 | 内存（GB） |
 | vmHostName | string | 是* | VM hostname（`useCloudInit=false` 时不可提供） |
-| osImage | string | 是* | Image 名称（使用 `installIso` 时不可提供） |
+| osImage | string | 是* | Image 名称（使用 `installIso` 时可选，见 [从 ISO 安装](#从-iso-安装)） |
 | osVariant | string | 是 | OS 类型（如 `ubuntu24.04`） |
 | bridge | string | 是 | 网桥名称 |
 | useCloudInit | bool | 否 | 是否使用 cloud-init 启动（默认 true；提供 `installIso` 时默认 false），见下方 [不使用 cloud-init](#不使用-cloud-init) |
@@ -215,7 +215,31 @@ POST /api/v1/vms
 
 ### 从 ISO 安装
 
-用已就绪的 `kvm_iso` 在空白系统盘上安装系统：
+用已就绪的 `kvm_iso` 安装系统。系统盘有两种方式：
+
+**方式一：安装后做成基础镜像（可 commit）**
+
+先建一个空白基础镜像，VM 的系统盘是它的 overlay；安装完成后 `commit`，装好的系统就写入该镜像，之后其他 VM 可用 `osImage` 引用它。
+
+```json
+POST /api/v1/images/fnos-base
+{"imageFormat": "qcow2", "imageSource": "local", "sizeInGB": 64}
+
+POST /api/v1/vms
+{
+  "id": "fnos-prep",
+  "cpu": 2,
+  "ramInGB": 4,
+  "osVariant": "debian12",
+  "bridge": "ovs-br0",
+  "osImage": "fnos-base",
+  "installIso": "fnos-1.2"
+}
+```
+
+安装完成后：`stop` → `eject-iso` → `commit`。
+
+**方式二：独立空白盘（不可 commit）**
 
 ```json
 POST /api/v1/vms
@@ -230,8 +254,11 @@ POST /api/v1/vms
 }
 ```
 
+系统盘是 `diskSizeGB` 大小、没有 backing file 的空白 qcow2，`diskSizeGB` 必填；`commit` 会返回 400（没有可写回的 backing image）。
+
+通用说明：
+
 - `installIso` 引用的 ISO 必须存在且 `downloadState` 为 `"ready"`。
-- 系统盘为 `diskSizeGB` 大小的空白 qcow2，因此 `diskSizeGB` 必填，`osImage` 不可提供。
 - `useCloudInit` 默认为 false；显式设为 true 返回 400。其余 cloud-init 专用字段的限制同 [不使用 cloud-init](#不使用-cloud-init)。
 - VM 创建后为 `stopped`，`POST /api/v1/vms/<name>/start` 启动后通过 VNC（`--graphics vnc,listen=0.0.0.0`）完成安装。
 - 启动顺序为 `hd,cdrom`：空白盘无法启动，会进入 ISO 安装程序；安装完成重启后直接从系统盘启动，不会再次进入安装程序。
