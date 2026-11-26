@@ -87,6 +87,50 @@ POST /api/v1/images/<name>
 
 ---
 
+## ISO 管理
+
+ISO 是只读的安装介质，用于以 cdrom 方式挂载到 VM 上安装系统；它与 image 分开管理，不会被当作磁盘或 backing file 使用。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/iso` | 列出所有 ISO（含 `isoFileDir` 下未纳管的 `.iso` 文件） |
+| GET | `/api/v1/iso/<name>` | 查看 ISO 详情（`downloadState`、`sizeInBytes`、`sha256`） |
+| POST | `/api/v1/iso/<name>` | 从远程 URL 下载（异步） |
+| PUT | `/api/v1/iso/<name>` | 上传 ISO 文件（流式写盘） |
+| DELETE | `/api/v1/iso/<name>` | 删除 ISO 定义和文件 |
+
+存储位置由 `config.json` 的 `isoDataDir`（定义 JSON）和 `isoFileDir`（`.iso` 文件）决定。`<name>` 只能包含字母、数字、`.`、`_`、`-`，不能以 `.`/`-` 开头，也不要带 `.iso` 后缀。
+
+### 远程下载
+
+```json
+POST /api/v1/iso/<name>
+{
+  "downloadLink": "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso",
+  "sha256": "<可选，64 位十六进制>"
+}
+```
+
+返回 202，后台下载；轮询 `GET /api/v1/iso/<name>` 直到 `downloadState` 为 `"ready"` 或 `"failed"`。提供 `sha256` 时下载完成后会校验，不一致则判为 `failed`。
+
+### 上传
+
+```bash
+curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
+     'http://<host>:5000/api/v1/iso/<name>?sha256=<可选>'
+```
+
+请求体即 ISO 原始内容，需要 `Content-Length`。上传同步完成并返回 201，响应和定义 JSON 中都会记录实际文件的 `sha256`。
+
+### 覆盖与删除
+
+- 已存在且 `downloadState` 为 `"ready"` 的 ISO 不能直接覆盖（409 `CONFLICT`），需先 DELETE。
+- `"failed"` 的 ISO 可直接重新 POST/PUT，残留文件会被清理。
+- 传输中（`"in-progress"` 或下载进度对象）的 ISO 不能覆盖或删除（409）。
+- 服务重启时，未完成的传输会被标记为 `"failed"` 并清理临时文件。
+
+---
+
 ## VM 管理
 
 | 方法 | 路径 | 说明 |

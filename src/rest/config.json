@@ -4,6 +4,8 @@
     "vmDataDir": "/opt/kvm/vms",
     "imageDataDir": "/opt/kvm/images/data",
     "imageFileDir": "/var/kvm/images",
+    "isoDataDir": "/opt/kvm/iso/data",
+    "isoFileDir": "/var/kvm/iso",
     "bridgeDataDir": "/opt/kvm/network",
     "defaultBridge": "br0",
     "defaultRamInGB": 2,

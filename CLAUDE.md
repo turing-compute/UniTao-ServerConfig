@@ -20,6 +20,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 # 运行任意组件 — runpy.sh 设置 PYTHONPATH=src/，然后用你的参数执行 python3
 ./src/runpy.sh src/kvm/vm/kvm_vm.py --path src/kvm/vm/example/vm.json
 ./src/runpy.sh src/kvm/image/kvm_image.py --path <磁盘数据文件路径.json>
+./src/runpy.sh src/kvm/iso/kvm_iso.py --path <ISO数据文件路径.json>
 ./src/runpy.sh src/network/bridge/net_bridge.py --path <桥接数据文件路径.json>
 
 # 生成随机 MAC 地址
@@ -71,6 +72,13 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
   - `remote`：通过 `wget` 从 `downloadLink` 下载。
   - `local`：使用 `qemu-img create` 创建（支持 `qcow2` 和 `raw`/`img` 格式），可选基于基础镜像（`-b`/`-F` 参数），可选指定大小。
 - 镜像是幂等的 — 如果 `imagePath` 处文件已存在，则跳过创建。
+
+### KVM ISO 管理 (`src/kvm/iso/kvm_iso.py`)
+
+- **`KvmIso`** — 只读安装介质（`.iso`），以 cdrom 方式挂载到虚拟机，与 `KvmImage` 分开管理，永远不会被当作磁盘或 backing file。
+  - `remote`：从 `downloadLink` 下载，可选 `sha256` 校验。
+  - `upload`：文件由 REST `PUT /api/v1/iso/<name>` 流式上传写入。
+- 幂等 — `isoPath` 处文件已存在则跳过。REST 层见 `src/rest/api_iso.py`（`isoDataDir` 存定义 JSON，`isoFileDir` 存 `.iso` 文件）。
 
 ### 网络桥接 (`src/network/bridge/`)
 

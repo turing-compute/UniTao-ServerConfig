@@ -10,12 +10,13 @@ from security.key_manager import KeyManager
 from shared.logger import Log
 from rest.api_vm import vm_bp
 from rest.api_image import image_bp, recover_stale_images
+from rest.api_iso import iso_bp, recover_stale_iso
 from rest.api_bridge import bridge_bp
 from rest.api_schema import schema_bp
 from rest.api_utils import utils_bp
 
 # Config keys that are directory paths and should be resolved to absolute paths.
-_DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "bridgeDataDir", "hostKeyDir"]
+_DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "isoDataDir", "isoFileDir", "bridgeDataDir", "hostKeyDir"]
 
 
 def load_config(config_path: str = None) -> dict:
@@ -93,6 +94,7 @@ def create_app(config: dict = None) -> Flask:
     app.config["CONFIG"] = config
     app.config["KEY_MANAGER"] = key_manager
     recover_stale_images(app)
+    recover_stale_iso(app)
     _recover_vms_after_reboot(app, logger)
     app.config["CONFIG"] = config
     app.config["JSONIFY_PRETTYPRINT_REGULAR"] = True
@@ -110,6 +112,7 @@ def create_app(config: dict = None) -> Flask:
     app.register_blueprint(schema_bp, url_prefix="/api/v1")
     app.register_blueprint(vm_bp, url_prefix="/api/v1/vms")
     app.register_blueprint(image_bp, url_prefix="/api/v1/images")
+    app.register_blueprint(iso_bp, url_prefix="/api/v1/iso")
     app.register_blueprint(bridge_bp, url_prefix="/api/v1/bridges")
     app.register_blueprint(utils_bp, url_prefix="/api/v1/utils")
 
