@@ -68,7 +68,6 @@ curl -s -X POST $HOST/api/v1/vms -H "Content-Type: application/json" -d '{
   "osImage": "wireguard26.04.01",
   "osVariant": "ubuntu24.04",
   "bridge": "ovs-br0",
-  "useDHCP4": true,
   "diskSizeGB": 20,
   "authType": "HostKey",
   "shareInventoryData": true,
@@ -212,7 +211,6 @@ curl -s -X POST $HOST/api/v1/vms -H "Content-Type: application/json" -d '{
   "osImage": "wireguard26.04.01",
   "osVariant": "ubuntu24.04",
   "bridge": "ovs-br0",
-  "useDHCP4": true,
   "shareInventoryData": true,
   "prepareDomainImage": true
 }'
