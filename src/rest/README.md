@@ -167,7 +167,6 @@ POST /api/v1/vms
   "osImage": "ubuntu26.04",
   "osVariant": "ubuntu24.04",
   "bridge": "ovs-br0",
-  "useDHCP4": true,
   "shareInventoryData": true,
   "prepareDomainImage": true
 }
@@ -184,9 +183,8 @@ POST /api/v1/vms
 | bridge | string | 是 | 网桥名称 |
 | useCloudInit | bool | 否 | 是否使用 cloud-init 启动（默认 true；提供 `installIso` 时默认 false），见下方 [不使用 cloud-init](#不使用-cloud-init) |
 | installIso | string | 否 | 用 `kvm_iso` 中的 ISO 安装系统，见下方 [从 ISO 安装](#从-iso-安装) |
-| useDHCP4 | bool | 否 | 使用 DHCP（默认 false，需同时提供 ipv4 + gateway4） |
-| ipv4 | string | 否 | 静态 IP（CIDR 格式，如 `192.168.1.100/24`） |
-| gateway4 | string | 否 | 网关地址 |
+| ipv4 | string | 否 | 静态 IP（CIDR 格式，如 `192.168.1.100/24`）；不提供则网卡使用 DHCP |
+| gateway4 | string | 否 | 网关地址（与 `ipv4` 一起使用） |
 | shareInventoryData | bool | 否 | 注入 inventory_tool.py 和 report_network.py |
 | prepareDomainImage | bool | 否 | 注入 prep_image_for_commit.py |
 | diskSizeGB | int | 否 | 磁盘大小（GB）。使用 `osImage` 时默认等于该 image 的 `sizeInGB`，且不能小于它（否则 400） |
