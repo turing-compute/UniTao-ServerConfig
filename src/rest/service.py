@@ -8,6 +8,7 @@ _DATA_DIR_KEY = {
     "vm":     "vmDataDir",
     "image":  "imageDataDir",
     "bridge": "bridgeDataDir",
+    "kvm_iso": "isoDataDir",
 }
 
 DATA_TYPES = list(_DATA_DIR_KEY.keys())
@@ -28,6 +29,11 @@ def get_data_dir(app, data_type: str) -> str:
 def get_image_file_dir(app) -> str:
     """Return the absolute path where disk image files are stored."""
     return _get_config(app)["imageFileDir"]
+
+
+def get_iso_file_dir(app) -> str:
+    """Return the absolute path where ISO installation media files are stored."""
+    return _get_config(app)["isoFileDir"]
 
 
 # ── VM paths (nested: {vmDataDir}/{name}/data/{name}.json) ──
