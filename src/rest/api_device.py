@@ -1,4 +1,5 @@
 import logging
+import os
 
 from extlib.flask import Blueprint, request, jsonify, current_app
 
@@ -14,13 +15,16 @@ def _get_logger() -> logging.Logger:
     return Log.get_logger("REST-Device")
 
 
-def managed_usb_claims(app) -> dict:
-    """{"<vendorId>:<productId>": [vm names]} from the usbDevices of managed VM JSONs.
+def managed_claims(app) -> dict:
+    """Devices claimed by managed VM JSONs (usbDevices / blockDevices).
 
+    Returns {"usb": {"<vendorId>:<productId>": [vms]}, "block": {"<kernel name>": [vms]}}.
     A stopped managed VM has no libvirt domain, so libvirt alone cannot tell that
-    the device is taken: it will be grabbed again on the VM's next start.
+    the device is taken: it will be grabbed again on the VM's next start. Block
+    claims are keyed by the kernel name the by-id link currently resolves to; a
+    device that is not plugged in claims nothing.
     """
-    claims = {}
+    claims = {"usb": {}, "block": {}}
     for vm_name in list_entities(app, "vm"):
         try:
             vm_data = read_entity_data(app, "vm", vm_name) or {}
@@ -31,21 +35,38 @@ def managed_usb_claims(app) -> dict:
                 key = KvmVm.usb_device_key(device)
             except (KeyError, TypeError):
                 continue
-            claims.setdefault(key, []).append(vm_name)
+            claims["usb"].setdefault(key, []).append(vm_name)
+        for device in vm_data.get(KvmVm.Keyword.BlockDevices, None) or []:
+            path = device.get(KvmVm.Keyword.Path) if isinstance(device, dict) else None
+            if not isinstance(path, str) or not os.path.exists(path):
+                continue
+            name = os.path.basename(os.path.realpath(path))
+            claims["block"].setdefault(name, []).append(vm_name)
     return claims
 
 
-def apply_vm_claims(devices: dict, claims: dict):
-    """Add `configuredOn` to USB devices; a device claimed by a VM is not attachable.
+def _merge(*lists) -> list:
+    result = []
+    for items in lists:
+        for item in items:
+            if item not in result:
+                result.append(item)
+    return result
 
-    The claim also blocks the USB disk's entry in the block list.
+
+def apply_vm_claims(devices: dict, claims: dict):
+    """Add `configuredOn` to every device; a device claimed by a VM is not attachable.
+
+    A USB disk is one device seen twice: a claim through either list (usbDevices
+    or blockDevices) blocks both its USB entry and its block entry.
     """
     usb_devices = devices.get(KvmDevice.Keyword.Types.USB, None)
     if usb_devices is None:
         usb_devices = KvmDevice.discover_usb()
     claimed_usb = {}
     for usb in usb_devices:
-        vms = claims.get(f"{usb['vendorId']}:{usb['productId']}", [])
+        vms = _merge(claims["usb"].get(f"{usb['vendorId']}:{usb['productId']}", []),
+                     *[claims["block"].get(name, []) for name in usb.get("blockDevices", [])])
         if KvmDevice.Keyword.Types.USB in devices:
             usb["configuredOn"] = vms
         if vms:
@@ -54,16 +75,17 @@ def apply_vm_claims(devices: dict, claims: dict):
                 usb["attachable"] = False
                 usb["reason"] = f"configured on VM [{', '.join(vms)}]"
     for blk in devices.get(KvmDevice.Keyword.Types.Block, []):
-        vms = claimed_usb.get(blk.get("usbDevice"))
+        vms = _merge(claims["block"].get(blk["id"], []), claimed_usb.get(blk.get("usbDevice"), []))
+        blk["configuredOn"] = vms
         if vms and blk["attachable"]:
             blk["attachable"] = False
-            blk["reason"] = f"configured on VM [{', '.join(vms)}] as USB device {blk['usbDevice']}"
+            blk["reason"] = f"configured on VM [{', '.join(vms)}]"
 
 
 def discover_devices(device_type: str = None) -> dict:
     """KvmDevice.discover() plus the claims of managed VM JSONs."""
     devices = KvmDevice.discover(device_type, _get_logger())
-    apply_vm_claims(devices, managed_usb_claims(current_app))
+    apply_vm_claims(devices, managed_claims(current_app))
     return devices
 
 

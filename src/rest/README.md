@@ -164,6 +164,9 @@ curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
 | GET | `/api/v1/vms/<name>/usb` | 列出 VM 配置的 USB 直通设备 |
 | POST | `/api/v1/vms/<name>/usb` | 把主机 USB 设备挂到 VM（VM 需已停止），见 [USB 直通](#usb-直通) |
 | DELETE | `/api/v1/vms/<name>/usb/<vendorId>:<productId>` | 卸下 USB 设备（VM 需已停止） |
+| GET | `/api/v1/vms/<name>/block` | 列出 VM 配置的直通磁盘 |
+| POST | `/api/v1/vms/<name>/block` | 把主机整块磁盘直通给 VM（VM 需已停止），见 [块设备直通](#块设备直通) |
+| DELETE | `/api/v1/vms/<name>/block/<by-id 名>` | 卸下直通磁盘（VM 需已停止） |
 | POST | `/api/v1/vms/<name>/commit` | 将 qcow2 disk 变更提交到 backing image |
 | GET | `/api/v1/vms/<name>/console` | 网页 VNC 控制台（浏览器打开） |
 | POST | `/api/v1/vms/<name>/console` | 为控制台页面启动一次性 websockify（页面自动调用） |
@@ -347,6 +350,40 @@ DELETE /api/v1/vms/<name>/usb/0bc2:3343
 **安全拔插流程**：在来宾里卸载文件系统 → `POST /api/v1/vms/<name>/stop` → `DELETE` 卸下（或保留配置）→ 物理拔出。插回：插上 → 确认 `attachable` 为 `true` → VM 已停止时 `POST` 挂载 → `start`。VM 运行中物理拔线等同于直接拔掉物理机上的硬盘，来宾若仍挂载着会丢数据。
 
 `GET /api/v1/vms/<name>/usb` 返回每个已配置设备的 `present`（主机上是否插着）、`hostDevices`（对应的主机 USB `id`）、`liveAttached`（当前是否挂在运行中的 VM 上）。
+
+### 块设备直通
+
+把主机上的整块磁盘（SATA/NVMe/USB 硬盘）作为 virtio 磁盘交给 VM，性能比 USB 直通好，来宾里是 `/dev/vdX`。与 USB 直通一样**不支持热插拔**：挂载和卸下都要求 VM 已停止，下次 `start` 时生效。
+
+先用 [`GET /api/v1/devices?type=block`](#主机设备) 找到磁盘，再按 `id` 或 by-id 路径挂载：
+
+```json
+POST /api/v1/vms/<name>/block
+{"device": "sdb"}
+```
+
+```json
+POST /api/v1/vms/<name>/block
+{"path": "/dev/disk/by-id/usb-Seagate_Expansion_HDD_NAAB1-0:0"}
+```
+
+- 写入 VM JSON 的 `blockDevices`（`[{"path", "description"}]`）。`path` 一律记录 `/dev/disk/by-id/...`：按 `id` 挂载时取该磁盘的 `byIdPath`，`/dev/sdX` 会随插拔、重启变化，不能用。磁盘没有 by-id 链接时返回 409 `NO_STABLE_PATH`。
+- 启动时生成 `--disk path=<by-id>,format=raw,bus=virtio,cache=none,io=native`。
+- 只能直通整块磁盘；by-id 路径指向分区（`-partN`）或不在列表中的设备时返回 400。
+- 磁盘 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`：主机上有挂载点（含 swap）、承载 LVM/RAID/LUKS/ZFS、已挂在其他 VM 上，或已配置在其他 VM 中。
+- 同一块 USB 硬盘只能用一种方式挂到一个 VM：以块设备配置后，它的 USB 条目也不可挂，反之亦然。
+- 不在主机上时返回 404 `DEVICE_NOT_FOUND`；已配置在本 VM 上（任一 by-id 链接指向同一块盘）时返回 200，`attached: false`。
+- 启动时磁盘不在（如 USB 硬盘已拔掉）会跳过它，VM 照常启动，日志中有 WARNING。
+
+卸下（`<by-id 名>` 是 `path` 的最后一段，也是 `GET` 返回的 `key`）：
+
+```
+DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
+```
+
+`GET /api/v1/vms/<name>/block` 返回每个已配置磁盘的 `key`、`present`（by-id 路径是否存在）、`hostDevice`（当前对应的内核设备名）、`liveAttached`。
+
+安全拔插流程同 [USB 直通](#usb-直通)：来宾里卸载 → `stop` → `DELETE`（或保留配置）→ 物理拔出。
 
 ### VM 认证方式
 
@@ -539,7 +576,7 @@ USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ �
 | 原因 | 说明 |
 |------|------|
 | `attached to VM [<vm>]` | 已挂在某个 libvirt domain 上（`virsh dumpxml` 中有对应的 `hostdev`/`disk`）。USB 硬盘无论以哪种方式挂出，两边都会标记 |
-| `configured on VM [<vm>]` | 已写入某个受管 VM JSON 的 `usbDevices`（见 [USB 直通](#usb-直通)）。该 VM 停止时没有 domain，但下次启动会再次占用。USB 条目的 `configuredOn` 列出这些 VM |
+| `configured on VM [<vm>]` | 已写入某个受管 VM JSON 的 `usbDevices` 或 `blockDevices`（见 [USB 直通](#usb-直通)、[块设备直通](#块设备直通)）。该 VM 停止时没有 domain，但下次启动会再次占用。`configuredOn` 列出这些 VM；USB 硬盘无论以哪种方式配置，两边都会标记 |
 | `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
 | `in use by host: ...` | 磁盘承载 LVM、RAID、LUKS 或 ZFS 成员 |
 
@@ -574,6 +611,7 @@ GET /api/v1/devices
         "usbDevice": "2-1",
         "partitions": [{"name": "sdb1", "type": "part", "fsType": "ntfs", "sizeBytes": 4000785104896, "mountpoints": []}],
         "mountpoints": [], "hostUse": [],
+        "configuredOn": [],
         "attachedTo": null, "attachable": true, "reason": null
       }
     ]

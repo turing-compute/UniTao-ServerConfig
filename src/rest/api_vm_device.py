@@ -1,12 +1,17 @@
 #########################################################################################
-# USB passthrough for managed VMs
+# Host device passthrough for managed VMs
 #
 #   GET    /api/v1/vms/<name>/usb                         list the VM's USB devices
 #   POST   /api/v1/vms/<name>/usb                         attach a host USB device
 #   DELETE /api/v1/vms/<name>/usb/<vendorId>:<productId>  detach it
 #
-# The VM JSON `usbDevices` list is the source of truth: managed VMs are transient
-# domains rebuilt from the JSON on every start (KvmVm.add_usb_hostdevs).
+#   GET    /api/v1/vms/<name>/block                       list the VM's passthrough disks
+#   POST   /api/v1/vms/<name>/block                       attach a host disk
+#   DELETE /api/v1/vms/<name>/block/<by-id name>          detach it
+#
+# The VM JSON `usbDevices` / `blockDevices` lists are the source of truth: managed
+# VMs are transient domains rebuilt from the JSON on every start
+# (KvmVm.add_usb_hostdevs, KvmVm.create_vm_cmd).
 #
 # No hot-plug: attach/detach require the VM to be stopped and take effect on the
 # next start. Pulling a disk out of a running guest that still has it mounted loses
@@ -14,6 +19,7 @@
 #########################################################################################
 
 import logging
+import os
 import re
 
 from extlib.flask import Blueprint, request, jsonify, current_app
@@ -28,14 +34,14 @@ from rest.api_device import discover_devices
 from kvm.device.kvm_device import KvmDevice
 from kvm.vm.kvm_vm import KvmVm
 
-vm_usb_bp = Blueprint("vm_usb", __name__)
+vm_device_bp = Blueprint("vm_device", __name__)
 
 _KEY_PATTERN = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})$")
 _HEX4 = re.compile(r"^(0x)?[0-9a-fA-F]{1,4}$")
 
 
 def _get_logger() -> logging.Logger:
-    return Log.get_logger("REST-VM-USB")
+    return Log.get_logger("REST-VM-Device")
 
 
 def _norm_id(value):
@@ -52,7 +58,7 @@ def _require_stopped(name: str, vm_data: dict):
     if vm_data.get("vmState") != KvmVm.Keyword.VmStates.Stopped:
         return _patch_error(
             "VM_RUNNING",
-            f"VM '{name}' must be stopped before changing USB devices "
+            f"VM '{name}' must be stopped before changing passthrough devices "
             f"(vmState='{vm_data.get('vmState')}'); hot-plug is not supported", 409), None
     live_state = _get_virsh_state(name)
     if live_state == KvmVm.Keyword.VmStates.Running:
@@ -71,7 +77,7 @@ def _undefine_if_persistent(vm_name: str, live_state: str, warnings: list):
         warnings.append(f"Failed to undefine persistent domain '{vm_name}': {e}")
 
 
-@vm_usb_bp.route("/<name>/usb", methods=["GET"])
+@vm_device_bp.route("/<name>/usb", methods=["GET"])
 def list_vm_usb(name: str):
     vm_data = read_entity_data(current_app, "vm", name)
     if vm_data is None:
@@ -100,7 +106,7 @@ def list_vm_usb(name: str):
     })
 
 
-@vm_usb_bp.route("/<name>/usb", methods=["POST"])
+@vm_device_bp.route("/<name>/usb", methods=["POST"])
 def attach_vm_usb(name: str):
     """Attach a host USB device to a stopped VM; it is passed through from the next start.
 
@@ -182,7 +188,7 @@ def attach_vm_usb(name: str):
         }), 201
 
 
-@vm_usb_bp.route("/<name>/usb/<key>", methods=["DELETE"])
+@vm_device_bp.route("/<name>/usb/<key>", methods=["DELETE"])
 def detach_vm_usb(name: str, key: str):
     """Remove a USB device from a stopped VM; the next start no longer passes it through."""
     logger = _get_logger()
@@ -213,6 +219,169 @@ def detach_vm_usb(name: str, key: str):
         warnings = []
         _undefine_if_persistent(name, live_state, warnings)
         logger.info("Detached USB [%s] from VM [%s]", key, name)
+        return jsonify({
+            "success": True,
+            "data": {"name": name, "key": key, "detached": True, "warnings": warnings}
+        })
+
+
+# ───────────────────────────── block device passthrough ─────────────────────────────
+
+_BLOCK_KEY_PATTERN = re.compile(r"^[^/\s]+$")
+
+
+def _same_disk(path_a: str, path_b: str) -> bool:
+    return os.path.exists(path_a) and os.path.exists(path_b) \
+        and os.path.realpath(path_a) == os.path.realpath(path_b)
+
+
+@vm_device_bp.route("/<name>/block", methods=["GET"])
+def list_vm_block(name: str):
+    vm_data = read_entity_data(current_app, "vm", name)
+    if vm_data is None:
+        return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+
+    attached = KvmDevice.attached_devices(_get_logger())["block"]
+    devices = []
+    for device in vm_data.get(KvmVm.Keyword.BlockDevices, None) or []:
+        path = device.get(KvmVm.Keyword.Path, "")
+        present = os.path.exists(path)
+        real = os.path.realpath(path) if present else None
+        entry = dict(device)
+        entry.update({
+            "key": KvmVm.block_device_key(device),
+            "present": present,
+            "hostDevice": os.path.basename(real) if real else None,
+            "liveAttached": real is not None and attached.get(real) == name,
+        })
+        devices.append(entry)
+
+    return jsonify({
+        "success": True,
+        "data": {"name": name, "blockDevices": devices}
+    })
+
+
+@vm_device_bp.route("/<name>/block", methods=["POST"])
+def attach_vm_block(name: str):
+    """Pass a whole host disk through to a stopped VM, from its next start.
+
+    Body: {"device": "<id from GET /api/v1/devices?type=block>"}  e.g. "sdb"
+       or {"path": "/dev/disk/by-id/<name>"}
+    The VM JSON always records a /dev/disk/by-id path: /dev/sdX is not stable.
+    """
+    logger = _get_logger()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _patch_error("BAD_REQUEST", "Request body must be a JSON object", 400)
+
+    device_id = body.get("device", None)
+    path = body.get("path", None)
+    if device_id is None and path is None:
+        return _patch_error(
+            "VALIDATION_ERROR",
+            "Provide 'device' (disk id from GET /api/v1/devices?type=block) "
+            f"or 'path' ({KvmVm.BlockByIdDir}<name>)", 400)
+    if path is not None:
+        if (not isinstance(path, str) or not path.startswith(KvmVm.BlockByIdDir)
+                or not _BLOCK_KEY_PATTERN.match(path[len(KvmVm.BlockByIdDir):])):
+            return _patch_error("VALIDATION_ERROR",
+                                f"Invalid path '{path}', expect {KvmVm.BlockByIdDir}<name>", 400)
+
+    with _get_vm_lock(name):
+        vm_data = read_entity_data(current_app, "vm", name)
+        if vm_data is None:
+            return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+        error, live_state = _require_stopped(name, vm_data)
+        if error is not None:
+            return error
+
+        disks = discover_devices(KvmDevice.Keyword.Types.Block)[KvmDevice.Keyword.Types.Block]
+        if device_id is not None:
+            matches = [d for d in disks if d["id"] == device_id]
+            if not matches:
+                return _patch_error("DEVICE_NOT_FOUND", f"Disk '{device_id}' not found on host", 404)
+            disk = matches[0]
+            path = disk["byIdPath"]
+            if path is None:
+                return _patch_error(
+                    "NO_STABLE_PATH",
+                    f"Disk '{device_id}' has no {KvmVm.BlockByIdDir} link; "
+                    "/dev/sdX names are not stable enough to record", 409)
+        else:
+            if not os.path.exists(path):
+                return _patch_error("DEVICE_NOT_FOUND", f"'{path}' not found on host", 404)
+            matches = [d for d in disks if _same_disk(d["path"], path)]
+            if not matches:
+                return _patch_error(
+                    "VALIDATION_ERROR",
+                    f"'{path}' is not a whole disk listed by GET /api/v1/devices?type=block "
+                    "(partitions cannot be passed through)", 400)
+            disk = matches[0]
+        key = os.path.basename(path)
+
+        configured = vm_data.get(KvmVm.Keyword.BlockDevices, None) or []
+        for entry in configured:
+            if KvmVm.block_device_key(entry) == key or _same_disk(entry.get(KvmVm.Keyword.Path, ""), path):
+                return jsonify({
+                    "success": True,
+                    "data": {"name": name, "key": KvmVm.block_device_key(entry), "attached": False,
+                             "message": "already configured on this VM"}
+                })
+
+        # A stopped persistent domain of this VM may already hold it (attached by
+        # hand): just record it, the domain is undefined below anyway.
+        held_here = disk.get("attachedTo") == name
+        if not disk["attachable"] and not held_here:
+            return _patch_error(
+                "DEVICE_UNAVAILABLE",
+                f"Disk '{disk['id']}' ({path}) cannot be attached: {disk['reason']}", 409)
+
+        entry = {KvmVm.Keyword.Path: path}
+        if disk.get("model"):
+            entry["description"] = disk["model"]
+        vm_data[KvmVm.Keyword.BlockDevices] = configured + [entry]
+        _atomic_write_json(vm_json_path(current_app, name), vm_data)
+
+        warnings = []
+        _undefine_if_persistent(name, live_state, warnings)
+        logger.info("Attached disk [%s] (%s) to VM [%s]", path, disk["id"], name)
+        return jsonify({
+            "success": True,
+            "data": {"name": name, "key": key, "attached": True, "device": entry,
+                     "hostDevice": disk["id"], "warnings": warnings}
+        }), 201
+
+
+@vm_device_bp.route("/<name>/block/<key>", methods=["DELETE"])
+def detach_vm_block(name: str, key: str):
+    """Remove a passthrough disk from a stopped VM; the next start no longer has it."""
+    logger = _get_logger()
+    if not _BLOCK_KEY_PATTERN.match(key):
+        return _patch_error("VALIDATION_ERROR", f"Invalid disk key '{key}', expect a {KvmVm.BlockByIdDir} name", 400)
+
+    with _get_vm_lock(name):
+        vm_data = read_entity_data(current_app, "vm", name)
+        if vm_data is None:
+            return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+        error, live_state = _require_stopped(name, vm_data)
+        if error is not None:
+            return error
+
+        configured = vm_data.get(KvmVm.Keyword.BlockDevices, None) or []
+        remaining = [d for d in configured if KvmVm.block_device_key(d) != key]
+        if len(remaining) == len(configured):
+            return _patch_error("NOT_FOUND", f"Disk '{key}' is not configured on VM '{name}'", 404)
+
+        if remaining:
+            vm_data[KvmVm.Keyword.BlockDevices] = remaining
+        else:
+            vm_data.pop(KvmVm.Keyword.BlockDevices, None)
+        _atomic_write_json(vm_json_path(current_app, name), vm_data)
+
+        warnings = []
+        _undefine_if_persistent(name, live_state, warnings)
+        logger.info("Detached disk [%s] from VM [%s]", key, name)
         return jsonify({
             "success": True,
             "data": {"name": name, "key": key, "detached": True, "warnings": warnings}

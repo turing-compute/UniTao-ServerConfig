@@ -64,8 +64,9 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
   6. Cloud-Init 支持：生成 `user-data`、`meta-data` 和 `network-config` YAML 文件，通过 `genisoimage` 打包成 `cidata` ISO 文件，并作为 cdrom 挂载。同时将虚拟机 JSON 和网络 JSON 包含在 ISO 中以便自文档化。
   7. `hostCPU` 关键字：当存在且为 `true` 时，向 virt-install 添加 `--cpu host` 以启用 CPU 直通模式。
   8. `installIsoPath` 关键字：挂载安装 ISO 为 cdrom，并设置启动顺序 `--boot hd,cdrom`（空白盘不可启动时进入安装程序，装好后直接从硬盘启动）。REST 层通过 `installIso` 引用 `kvm_iso` 实体，`POST /vms/<name>/eject-iso` 卸载。
-  9. `usbDevices` 关键字：`[{"vendorId", "productId"}]`（4 位小写十六进制），USB 直通。不经 virt-install `--hostdev`（设备拔掉时 virt-install 会失败），而是由 `add_usb_hostdevs()` 在 `--print-xml` 输出中追加 `<hostdev type='usb'>`，`startupPolicy='optional'` 使设备不在时 VM 仍可启动。REST 层见 `src/rest/api_vm_usb.py`（`GET/POST /vms/<name>/usb`、`DELETE /vms/<name>/usb/<vid>:<pid>`）。**不支持热插拔**：POST/DELETE 要求 VM 已停止，下次启动生效。
-  10. VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`）。网页控制台见 `src/rest/api_console.py`：`GET /api/v1/vms/<name>/console` 提供 noVNC 页面，页面 `POST` 同一路径时启动一次性 `websockify --run-once`（连接断开即退出），VM stop/delete 时清理。
+  9. `usbDevices` 关键字：`[{"vendorId", "productId"}]`（4 位小写十六进制），USB 直通。不经 virt-install `--hostdev`（设备拔掉时 virt-install 会失败），而是由 `add_usb_hostdevs()` 在 `--print-xml` 输出中追加 `<hostdev type='usb'>`，`startupPolicy='optional'` 使设备不在时 VM 仍可启动。REST 层见 `src/rest/api_vm_device.py`（`GET/POST /vms/<name>/usb`、`DELETE /vms/<name>/usb/<vid>:<pid>`）。**不支持热插拔**：POST/DELETE 要求 VM 已停止，下次启动生效。
+  10. `blockDevices` 关键字：`[{"path"}]`，整块磁盘直通，`path` 必须是 `/dev/disk/by-id/<name>`（`/dev/sdX` 不稳定）。`create_vm_cmd()` 生成 `--disk path=...,format=raw,bus=virtio,cache=none,io=native`；libvirt 的块设备不支持 `startupPolicy`，所以设备不在时直接跳过（记 WARNING），VM 照常启动。REST 层同在 `api_vm_device.py`（`GET/POST /vms/<name>/block`、`DELETE /vms/<name>/block/<by-id 名>`），同样要求 VM 已停止。
+  11. VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`）。网页控制台见 `src/rest/api_console.py`：`GET /api/v1/vms/<name>/console` 提供 noVNC 页面，页面 `POST` 同一路径时启动一次性 `websockify --run-once`（连接断开即退出），VM stop/delete 时清理。
 
 - **`KvmNetwork`** — 虚拟机网络接口配置。支持两种接口类型：
   - `bridge`：连接到 Linux 网桥或 OVS 网桥。OVS 网桥会添加 `virtualport_type=openvswitch`。
@@ -88,7 +89,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 
 ### 主机设备发现 (`src/kvm/device/kvm_device.py`)
 
-- **`KvmDevice.discover(type)`** — 只读列出可挂给 VM 的主机设备：`usb`（sysfs `/sys/bus/usb/devices`，跳过 hub，用于 USB 直通）和 `block`（`lsblk` 整块磁盘，用于块设备直通，附 `/dev/disk/by-id` 路径）。USB 硬盘两边互相关联。每个设备带 `attachable`/`reason`：已挂在某个 domain 上（解析 `virsh dumpxml`）、主机上有挂载点、或承载 LVM/RAID/LUKS/ZFS 时不可挂。REST 层为 `GET /api/v1/devices`（`src/rest/api_device.py`，支持 `?type=` 和 `?attachable=true`），并叠加受管 VM JSON 中 `usbDevices` 的占用（`configuredOn`），因为已停止的 VM 没有 domain，libvirt 看不到。
+- **`KvmDevice.discover(type)`** — 只读列出可挂给 VM 的主机设备：`usb`（sysfs `/sys/bus/usb/devices`，跳过 hub，用于 USB 直通）和 `block`（`lsblk` 整块磁盘，用于块设备直通，附 `/dev/disk/by-id` 路径）。USB 硬盘两边互相关联。每个设备带 `attachable`/`reason`：已挂在某个 domain 上（解析 `virsh dumpxml`）、主机上有挂载点、或承载 LVM/RAID/LUKS/ZFS 时不可挂。REST 层为 `GET /api/v1/devices`（`src/rest/api_device.py`，支持 `?type=` 和 `?attachable=true`），并叠加受管 VM JSON 中 `usbDevices`/`blockDevices` 的占用（`configuredOn`），因为已停止的 VM 没有 domain，libvirt 看不到。
 
 ### 网络桥接 (`src/network/bridge/`)
 

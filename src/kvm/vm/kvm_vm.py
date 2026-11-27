@@ -46,6 +46,8 @@ class KvmVm:
         UsbDevices = "usbDevices"
         VendorId = "vendorId"
         ProductId = "productId"
+        BlockDevices = "blockDevices"
+        Path = "path"
         Login = "login"
 
         class AuthTypes:
@@ -184,6 +186,7 @@ class KvmVm:
                 raise ValueError(f"[{self.Keyword.InstallIsoPath}] does not exist [{real_install_iso_path}]")
             self.VmData[self.Keyword.InstallIsoPath] = real_install_iso_path
         self.validate_usb_devices()
+        self.validate_block_devices()
         os_type = self.VmData.get(self.Keyword.OsType, None)
         if os_type is None:
             raise ValueError(f"Missing field[{self.Keyword.OsType}] in Vm Data")
@@ -220,6 +223,39 @@ class KvmVm:
             if dev_key in seen:
                 raise ValueError(f"Duplicate [{self.Keyword.UsbDevices}] entry [{dev_key}]")
             seen.add(dev_key)
+
+    BlockByIdDir = "/dev/disk/by-id/"
+
+    @staticmethod
+    def block_device_key(device: dict) -> str:
+        """Identity of a blockDevices entry: the /dev/disk/by-id link name."""
+        return os.path.basename(device[KvmVm.Keyword.Path])
+
+    def validate_block_devices(self):
+        """blockDevices: optional list of {path} where path is a /dev/disk/by-id/ link.
+
+        by-id only: /dev/sdX names follow probe order and change across replug/reboot.
+        A missing device is not an error here (see create_vm_cmd).
+        """
+        block_devices = self.VmData.get(self.Keyword.BlockDevices, None)
+        if block_devices is None:
+            return
+        if not isinstance(block_devices, list):
+            raise ValueError(f"Invalid [{self.Keyword.BlockDevices}], expect a list")
+        seen = set()
+        for device in block_devices:
+            if not isinstance(device, dict):
+                raise ValueError(f"Invalid [{self.Keyword.BlockDevices}] entry [{device}], expect an object")
+            path = device.get(self.Keyword.Path, None)
+            if (not isinstance(path, str) or not path.startswith(self.BlockByIdDir)
+                    or path == self.BlockByIdDir or "/" in path[len(self.BlockByIdDir):]
+                    or any(c.isspace() for c in path)):
+                raise ValueError(f"Invalid [{self.Keyword.BlockDevices}] entry [{device}], "
+                                 f"[{self.Keyword.Path}] should be a {self.BlockByIdDir}<name> path")
+            key = self.block_device_key(device)
+            if key in seen:
+                raise ValueError(f"Duplicate [{self.Keyword.BlockDevices}] entry [{key}]")
+            seen.add(key)
 
     @staticmethod
     def usb_hostdev_xml(device: dict) -> str:
@@ -611,6 +647,14 @@ class KvmVm:
             vm_create_cmd.append(f"  --disk {disk.disk_cmd()}")
         for net in self.Networks:
             vm_create_cmd.append(f"  --network {net.net_cmd()}")
+        for device in self.VmData.get(self.Keyword.BlockDevices, None) or []:
+            path = device[self.Keyword.Path]
+            # libvirt has no startupPolicy for block disks: skip a missing device so
+            # the VM still boots without it (like USB startupPolicy='optional').
+            if not os.path.exists(path):
+                self.log.warning(f"Block device [{path}] not present, VM [{self.VmName}] starts without it")
+                continue
+            vm_create_cmd.append(f"  --disk path={path},format=raw,bus=virtio,cache=none,io=native")
         if self.VmData[self.Keyword.UseCloudInit]:
             vm_create_cmd.append(f"  --disk path={self.VmData[self.Keyword.CIIsoPath]},device=cdrom")
         install_iso_path = self.VmData.get(self.Keyword.InstallIsoPath, None)
