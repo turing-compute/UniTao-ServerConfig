@@ -97,12 +97,14 @@ class KvmDevice:
         usb_devices = KvmDevice.discover_usb()
         errors = {}
         try:
-            block_devices = KvmDevice.discover_block(logger)
+            tree = KvmDevice._lsblk(logger)
         except SystemError as e:
-            block_devices = []
+            tree = None
             errors[KvmDevice.Keyword.Types.Block] = str(e)
+        block_devices = KvmDevice.discover_block(logger, tree) if tree is not None else []
         KvmDevice._resolve_state(usb_devices, block_devices, attached,
-                                 block_error=errors.get(KvmDevice.Keyword.Types.Block))
+                                 block_error=errors.get(KvmDevice.Keyword.Types.Block),
+                                 other_usage=KvmDevice._other_block_usage(tree or []))
 
         result = {}
         if device_type in (None, KvmDevice.Keyword.Types.USB):
@@ -145,20 +147,21 @@ class KvmDevice:
                 "manufacturer": KvmDevice._read_sys(dev_dir, "manufacturer"),
                 "product": KvmDevice._read_sys(dev_dir, "product"),
                 "serial": KvmDevice._read_sys(dev_dir, "serial"),
-                "speedMbps": KvmDevice._read_sys(dev_dir, "speed"),
+                "speedMbps": KvmDevice._to_number(KvmDevice._read_sys(dev_dir, "speed")),
                 "classes": classes,
                 "blockDevices": sorted(block_map.get(name, [])),
             })
         return devices
 
     @staticmethod
-    def discover_block(logger: logging.Logger = None) -> list:
+    def discover_block(logger: logging.Logger = None, tree: list = None) -> list:
         """Whole disks from lsblk, with partitions/children and host mountpoints.
 
         Raises SystemError when lsblk is missing or fails: an empty list would
-        read as "no disks" rather than "unknown".
+        read as "no disks" rather than "unknown". `tree` reuses an lsblk result.
         """
-        tree = KvmDevice._lsblk(logger)
+        if tree is None:
+            tree = KvmDevice._lsblk(logger)
         mounted_btrfs = set()
         KvmDevice._mounted_btrfs_uuids(tree, mounted_btrfs)
         by_id = KvmDevice._by_id_map()
@@ -246,8 +249,14 @@ class KvmDevice:
     # ───────────────────────────── state resolution ─────────────────────────────
 
     @staticmethod
-    def _resolve_state(usb_devices: list, block_devices: list, attached: dict, block_error: str = None):
-        """Fill attachedTo / attachable / reason on both lists, cross-linking USB disks."""
+    def _resolve_state(usb_devices: list, block_devices: list, attached: dict, block_error: str = None,
+                       other_usage: dict = None):
+        """Fill attachedTo / attachable / reason on both lists, cross-linking USB disks.
+
+        other_usage: {name: reason} host use of block devices left out of the disk
+        list (e.g. a USB optical drive's sr0), still checked for their USB parent.
+        """
+        other_usage = other_usage or {}
         block_by_name = {b["id"]: b for b in block_devices}
 
         for usb in usb_devices:
@@ -287,6 +296,9 @@ class KvmDevice:
                     blk = block_by_name.get(name)
                     if blk is not None and not blk["attachable"]:
                         reason = f"{name} {blk['reason']}"
+                        break
+                    if blk is None and other_usage.get(name):
+                        reason = f"{name} {other_usage[name]}"
                         break
             usb["attachable"] = reason is None
             usb["reason"] = reason
@@ -410,6 +422,23 @@ class KvmDevice:
             KvmDevice._collect_usage(child, mountpoints, host_uses, mounted_btrfs)
 
     @staticmethod
+    def _other_block_usage(tree: list) -> dict:
+        """{name: reason} for top-level lsblk devices that discover_block leaves out
+        (sr, loop, ...) but that are in use on the host."""
+        result = {}
+        for node in tree:
+            name = node.get("name")
+            if not name or (node.get("type") == "disk" and not name.startswith(KvmDevice._SkipBlockPrefixes)):
+                continue
+            mountpoints, host_uses = [], []
+            KvmDevice._collect_usage(node, mountpoints, host_uses)
+            if mountpoints:
+                result[name] = f"mounted on host: {', '.join(mountpoints)}"
+            elif host_uses:
+                result[name] = f"in use by host: {', '.join(sorted(set(host_uses)))}"
+        return result
+
+    @staticmethod
     def _mounted_btrfs_uuids(nodes: list, result: set):
         for node in nodes or []:
             if node.get("fstype") == "btrfs" and node.get("uuid") and KvmDevice._node_mountpoints(node):
@@ -472,6 +501,15 @@ class KvmDevice:
             return int(value, 0) if isinstance(value, str) else int(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _to_number(value):
+        """'480' → 480, '1.5' → 1.5, anything else → None."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int(number) if number.is_integer() else number
 
     @staticmethod
     def _to_bool(value):

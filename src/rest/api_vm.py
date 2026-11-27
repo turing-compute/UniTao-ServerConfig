@@ -182,7 +182,7 @@ def _read_text(path: str) -> str:
 
 def _atomic_write_json(path: str, data: dict):
     directory = os.path.dirname(path)
-    fd, tmp_path = tempfile.mkstemp(prefix=".patch-", suffix=".json", dir=directory)
+    fd, tmp_path = tempfile.mkstemp(prefix=".patch-", suffix=".json.tmp", dir=directory)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=4)

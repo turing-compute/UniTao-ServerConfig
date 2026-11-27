@@ -31,7 +31,7 @@ from rest.service import read_entity_data, vm_json_path
 from rest.api_vm import (
     _get_vm_lock, _get_virsh_state, _patch_error, _atomic_write_json,
 )
-from rest.api_device import discover_devices
+from rest.api_device import discover_devices, device_entries
 from kvm.device.kvm_device import KvmDevice
 from kvm.vm.kvm_vm import KvmVm
 
@@ -82,12 +82,13 @@ def _host_use(disk: dict) -> list:
     return uses
 
 
-def _unavailable_reason(name: str, device: dict, disks: list):
+def _unavailable_reason(name: str, device: dict, found: dict):
     """Why `device` (a USB or block entry from discover_devices) cannot go to VM `name`.
 
     The only thing waived is "attached to VM [name]": a stopped persistent domain
     of this VM attached by hand, which is undefined after the attach anyway. Its
-    precedence in KvmDevice hides the other reasons, so those are re-checked here.
+    precedence in KvmDevice hides the other reasons, so those are re-checked here,
+    including the discovery errors that make host use or claims unknown.
     """
     others = [vm for vm in device.get("configuredOn", []) if vm != name]
     if others:
@@ -96,13 +97,30 @@ def _unavailable_reason(name: str, device: dict, disks: list):
         return None
     if device.get("attachedTo") != name:
         return device["reason"]
-    own_disks = [device] if "path" in device else \
+    errors = found.get("errors", {})
+    if errors.get("claims"):
+        return errors["claims"]
+    is_disk = "path" in device
+    if errors.get(KvmDevice.Keyword.Types.Block) and (is_disk or device.get("blockDevices")):
+        return f"cannot check host use: {errors[KvmDevice.Keyword.Types.Block]}"
+    disks = found.get(KvmDevice.Keyword.Types.Block, [])
+    own_disks = [device] if is_disk else \
         [d for d in disks if d["id"] in device.get("blockDevices", [])]
     for disk in own_disks:
         uses = _host_use(disk)
         if uses:
             return f"{disk['id']} " + "; ".join(uses)
     return None
+
+
+def _invalid_list(name: str, vm_data: dict, key: str):
+    """409 when vm_data[key] exists but is not a list (hand-edited JSON), else None."""
+    value = vm_data.get(key, None)
+    if value is None or isinstance(value, list):
+        return None
+    return _patch_error(
+        "INVALID_VM_DATA",
+        f"VM '{name}' JSON field [{key}] is not a list ({type(value).__name__}); fix the VM JSON first", 409)
 
 
 def _require_stopped(name: str, vm_data: dict):
@@ -142,7 +160,10 @@ def list_vm_usb(name: str):
     live_keys = {f"{a['vendorId']}:{a['productId']}" for a in attached if a["vm"] == name}
 
     devices = []
-    for device in vm_data.get(KvmVm.Keyword.UsbDevices, None) or []:
+    if _invalid_list(name, vm_data, KvmVm.Keyword.UsbDevices) is not None:
+        devices.append({"entry": vm_data[KvmVm.Keyword.UsbDevices], "key": None,
+                        "error": "usbDevices is not a list, fix the VM JSON"})
+    for device in device_entries(vm_data, KvmVm.Keyword.UsbDevices):
         key = _usb_key(device)
         if key is None:
             devices.append({"entry": device, "key": None, "error": "malformed entry, fix the VM JSON"})
@@ -189,12 +210,13 @@ def attach_vm_usb(name: str):
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
         error, live_state = _require_stopped(name, vm_data)
+        if error is None:
+            error = _invalid_list(name, vm_data, KvmVm.Keyword.UsbDevices)
         if error is not None:
             return error
 
         found = discover_devices()
         usb_devices = found[KvmDevice.Keyword.Types.USB]
-        host_disks = found[KvmDevice.Keyword.Types.Block]
         if device_id is not None:
             matches = [u for u in usb_devices if u["id"] == device_id]
             if not matches:
@@ -202,7 +224,7 @@ def attach_vm_usb(name: str):
             vendor_id, product_id = matches[0]["vendorId"], matches[0]["productId"]
         key = f"{vendor_id}:{product_id}"
 
-        configured = vm_data.get(KvmVm.Keyword.UsbDevices, None) or []
+        configured = device_entries(vm_data, KvmVm.Keyword.UsbDevices)
         if any(_usb_key(d) == key for d in configured):
             return jsonify({
                 "success": True,
@@ -228,7 +250,7 @@ def attach_vm_usb(name: str):
                 f"USB device '{host_device['id']}' ({key}) is already passed through to VM '{name}' "
                 "as a block device; DELETE it from /block first", 409)
 
-        reason = _unavailable_reason(name, host_device, host_disks)
+        reason = _unavailable_reason(name, host_device, found)
         if reason is not None:
             return _patch_error(
                 "DEVICE_UNAVAILABLE",
@@ -266,10 +288,12 @@ def detach_vm_usb(name: str, key: str):
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
         error, live_state = _require_stopped(name, vm_data)
+        if error is None:
+            error = _invalid_list(name, vm_data, KvmVm.Keyword.UsbDevices)
         if error is not None:
             return error
 
-        configured = vm_data.get(KvmVm.Keyword.UsbDevices, None) or []
+        configured = device_entries(vm_data, KvmVm.Keyword.UsbDevices)
         remaining = [d for d in configured if _usb_key(d) != key]
         if len(remaining) == len(configured):
             return _patch_error("NOT_FOUND", f"USB device '{key}' is not configured on VM '{name}'", 404)
@@ -305,7 +329,10 @@ def list_vm_block(name: str):
 
     attached = KvmDevice.attached_devices(_get_logger())["block"]
     devices = []
-    for device in vm_data.get(KvmVm.Keyword.BlockDevices, None) or []:
+    if _invalid_list(name, vm_data, KvmVm.Keyword.BlockDevices) is not None:
+        devices.append({"entry": vm_data[KvmVm.Keyword.BlockDevices], "key": None,
+                        "error": "blockDevices is not a list, fix the VM JSON"})
+    for device in device_entries(vm_data, KvmVm.Keyword.BlockDevices):
         key = _block_key(device)
         if key is None:
             devices.append({"entry": device, "key": None, "error": "malformed entry, fix the VM JSON"})
@@ -359,10 +386,16 @@ def attach_vm_block(name: str):
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
         error, live_state = _require_stopped(name, vm_data)
+        if error is None:
+            error = _invalid_list(name, vm_data, KvmVm.Keyword.BlockDevices)
         if error is not None:
             return error
 
-        disks = discover_devices(KvmDevice.Keyword.Types.Block)[KvmDevice.Keyword.Types.Block]
+        found = discover_devices(KvmDevice.Keyword.Types.Block)
+        lsblk_error = found.get("errors", {}).get(KvmDevice.Keyword.Types.Block)
+        if lsblk_error:
+            return _patch_error("SYSTEM_COMMAND_FAILED", f"Cannot list host disks: {lsblk_error}", 500)
+        disks = found[KvmDevice.Keyword.Types.Block]
         if device_id is not None:
             matches = [d for d in disks if d["id"] == device_id]
             if not matches:
@@ -386,7 +419,7 @@ def attach_vm_block(name: str):
             disk = matches[0]
         key = os.path.basename(path)
 
-        configured = vm_data.get(KvmVm.Keyword.BlockDevices, None) or []
+        configured = device_entries(vm_data, KvmVm.Keyword.BlockDevices)
         for entry in configured:
             entry_key = _block_key(entry)
             if entry_key is None:
@@ -405,7 +438,7 @@ def attach_vm_block(name: str):
                 f"Disk '{disk['id']}' is already passed through to VM '{name}' as USB device "
                 f"{disk.get('usbDevice')}; DELETE it from /usb first", 409)
 
-        reason = _unavailable_reason(name, disk, disks)
+        reason = _unavailable_reason(name, disk, found)
         if reason is not None:
             return _patch_error(
                 "DEVICE_UNAVAILABLE",
@@ -439,10 +472,12 @@ def detach_vm_block(name: str, key: str):
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
         error, live_state = _require_stopped(name, vm_data)
+        if error is None:
+            error = _invalid_list(name, vm_data, KvmVm.Keyword.BlockDevices)
         if error is not None:
             return error
 
-        configured = vm_data.get(KvmVm.Keyword.BlockDevices, None) or []
+        configured = device_entries(vm_data, KvmVm.Keyword.BlockDevices)
         remaining = [d for d in configured if _block_key(d) != key]
         if len(remaining) == len(configured):
             return _patch_error("NOT_FOUND", f"Disk '{key}' is not configured on VM '{name}'", 404)

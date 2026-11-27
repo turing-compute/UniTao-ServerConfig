@@ -397,7 +397,9 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 - 挂载接口在检查占用和写 VM JSON 期间持有一把所有 VM 共用的锁，两个请求同时把同一设备挂给不同 VM 时只有一个成功。
 - virsh 状态查询失败时，挂载/卸下返回 500 `SYSTEM_COMMAND_FAILED`，不在不确定 VM 是否运行时修改配置。
 - 同一 VM 已以另一种方式配置了这块 USB 硬盘时返回 409，提示先从 `/usb` 或 `/block` 中 DELETE。
-- VM JSON 中格式不对的条目（手工编辑造成：大写十六进制、`/dev/sdX` 路径、重复等）不会阻止 `start`/`stop`/`delete`：启动时跳过并记 WARNING（`Ignore [usbDevices] entry ...`），JSON 原样保留。`GET /vms/<name>/usb|block` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON。
+- VM JSON 中格式不对的条目（手工编辑造成：大写十六进制、`/dev/sdX` 路径、重复等）不会阻止 `start`/`stop`/`delete`：启动时跳过并记 WARNING（`Ignore [usbDevices] entry ...`），JSON 原样保留。`GET /vms/<name>/usb|block` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON。`usbDevices`/`blockDevices` 整个不是列表时，该 VM 的挂载/卸下返回 409 `INVALID_VM_DATA`，其他 VM 和 `GET /api/v1/devices` 不受影响。
+- 某个 VM 的 JSON 读不出来时，它占用了哪些设备无从得知：`GET /api/v1/devices` 多出 `errors.claims`，所有设备都标为不可挂，挂载接口一律拒绝。VM JSON 的写入是原子的（临时文件 + rename），正常读写不会读到写了一半的文件。
+- `lsblk` 不可用时，`POST /vms/<name>/block` 返回 500 `SYSTEM_COMMAND_FAILED`。
 
 ### VM 认证方式
 
@@ -594,6 +596,9 @@ USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ �
 | `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
 | `in use by host: ...` | 磁盘承载 LVM、RAID、LUKS、ZFS 或 bcache 成员；磁盘或分区上叠有内核 holder（`/sys/block/<dev>/holders` 非空，如 dm/md/bcache）；或是多盘 btrfs 中未显示挂载点的成员（与已挂载的 btrfs 同 UUID） |
 | `cannot check host use of ...: lsblk failed` | USB 设备带有磁盘，但 `lsblk` 不可用，无法确认主机是否在用 |
+| `cannot read VM JSON of [<vm>] ...` | 某个受管 VM 的 JSON 读不出来，设备占用情况未知（同时出现在 `errors.claims`） |
+
+USB 设备下的光驱等不在 `block` 列表中的设备（如 `sr0`）也会检查：光盘在主机上挂载着时，该 USB 设备不可挂。
 
 主机和 VM 同时写同一块盘会损坏数据，所以挂载前先在主机上 `umount`。
 
@@ -608,7 +613,7 @@ GET /api/v1/devices
         "vendorId": "0bc2", "productId": "3343",
         "bus": 2, "device": 3,
         "manufacturer": "Seagate", "product": "Expansion HDD", "serial": "NAAB1",
-        "speedMbps": "5000",
+        "speedMbps": 5000,
         "classes": ["massStorage"],
         "blockDevices": ["sdb"],
         "configuredOn": [],
@@ -634,7 +639,7 @@ GET /api/v1/devices
 }
 ```
 
-USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。`lsblk` 不可用时 `block` 为空列表，并多出 `"errors": {"block": "lsblk failed: ..."}`。
+USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。`lsblk` 不可用时 `block` 为空列表，并多出 `"errors": {"block": "lsblk failed: ..."}`。`speedMbps` 为数字（如 `480`、`1.5`），读不到时为 `null`。
 
 命令行同样可用：`./src/runpy.sh src/kvm/device/kvm_device.py [--type usb|block]`。
 

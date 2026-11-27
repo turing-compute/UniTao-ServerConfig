@@ -15,6 +15,12 @@ def _get_logger() -> logging.Logger:
     return Log.get_logger("REST-Device")
 
 
+def device_entries(vm_data: dict, key: str) -> list:
+    """vm_data[key] when it is a list, else [] (a hand-edited JSON may hold anything)."""
+    value = vm_data.get(key, None)
+    return value if isinstance(value, list) else []
+
+
 def managed_claims(app) -> dict:
     """Devices claimed by managed VM JSONs (usbDevices / blockDevices).
 
@@ -23,20 +29,27 @@ def managed_claims(app) -> dict:
     the device is taken: it will be grabbed again on the VM's next start. Block
     claims are keyed by the kernel name the by-id link currently resolves to; a
     device that is not plugged in claims nothing.
+
+    A VM JSON that cannot be read is listed in claims["unreadable"]: its claims
+    are unknown, not empty.
     """
-    claims = {"usb": {}, "block": {}}
+    claims = {"usb": {}, "block": {}, "unreadable": []}
     for vm_name in list_entities(app, "vm"):
         try:
             vm_data = read_entity_data(app, "vm", vm_name) or {}
         except Exception:
+            claims["unreadable"].append(vm_name)
             continue
-        for device in vm_data.get(KvmVm.Keyword.UsbDevices, None) or []:
+        if not isinstance(vm_data, dict):
+            claims["unreadable"].append(vm_name)
+            continue
+        for device in device_entries(vm_data, KvmVm.Keyword.UsbDevices):
             try:
                 key = KvmVm.usb_device_key(device)
             except (KeyError, TypeError):
                 continue
             claims["usb"].setdefault(key, []).append(vm_name)
-        for device in vm_data.get(KvmVm.Keyword.BlockDevices, None) or []:
+        for device in device_entries(vm_data, KvmVm.Keyword.BlockDevices):
             path = device.get(KvmVm.Keyword.Path) if isinstance(device, dict) else None
             if not isinstance(path, str) or not os.path.exists(path):
                 continue
@@ -58,7 +71,8 @@ def apply_vm_claims(devices: dict, claims: dict):
     """Add `configuredOn` to every device; a device claimed by a VM is not attachable.
 
     A USB disk is one device seen twice: a claim through either list (usbDevices
-    or blockDevices) blocks both its USB entry and its block entry.
+    or blockDevices) blocks both its USB entry and its block entry. When some VM
+    JSON could not be read, nothing is attachable: its claims are unknown.
     """
     usb_devices = devices.get(KvmDevice.Keyword.Types.USB, None)
     if usb_devices is None:
@@ -80,6 +94,16 @@ def apply_vm_claims(devices: dict, claims: dict):
         if vms and blk["attachable"]:
             blk["attachable"] = False
             blk["reason"] = f"configured on VM [{', '.join(vms)}]"
+
+    unreadable = claims.get("unreadable", [])
+    if unreadable:
+        why = f"cannot read VM JSON of [{', '.join(unreadable)}], its device claims are unknown"
+        devices.setdefault("errors", {})["claims"] = why
+        for kind in (KvmDevice.Keyword.Types.USB, KvmDevice.Keyword.Types.Block):
+            for device in devices.get(kind, []):
+                if device["attachable"]:
+                    device["attachable"] = False
+                    device["reason"] = why
 
 
 def discover_devices(device_type: str = None) -> dict:
