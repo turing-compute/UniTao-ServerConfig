@@ -368,7 +368,7 @@ POST /api/v1/vms/<name>/block
 {"path": "/dev/disk/by-id/usb-Seagate_Expansion_HDD_NAAB1-0:0"}
 ```
 
-- 写入 VM JSON 的 `blockDevices`（`[{"path", "description"}]`）。`path` 一律记录 `/dev/disk/by-id/...`：按 `id` 挂载时取该磁盘的 `byIdPath`，`/dev/sdX` 会随插拔、重启变化，不能用。磁盘没有 by-id 链接时返回 409 `NO_STABLE_PATH`。
+- 写入 VM JSON 的 `blockDevices`（`[{"path", "description"}]`）。`path` 一律记录 `/dev/disk/by-id/...`：按 `id` 挂载时取该磁盘的 `byIdPath`，`/dev/sdX` 会随插拔、重启变化，不能用。磁盘没有 by-id 链接时返回 409 `NO_STABLE_PATH`。`path` 不能含 `,` 或空白（virt-install 的 `--disk` 按逗号拆分选项），也不能是由盘上内容生成的链接（`lvm-pv-uuid-*` 等，来宾重写磁盘后会消失），否则返回 400；启动时和占用统计也按同一规则忽略这类条目。`DELETE` 接受任何不含 `/` 的名字，旧的不合规条目也能删除。删除 VM 时，persistent domain 会被一并 undefine。
 - 启动时生成 `--disk path=<by-id>,format=raw,bus=virtio,cache=none,io=native`。有直通盘时，系统盘和安装 ISO 使用显式的逐设备启动顺序（`boot_order`），直通盘不参与启动，避免固件从直通盘上的系统启动而跳过安装程序。
 - 只能直通整块磁盘；by-id 路径指向分区（`-partN`）或不在列表中的设备时返回 400。
 - 磁盘 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`：主机上有挂载点（含 swap）、主机正在使用（已激活的 LVM/RAID/加密、holder、已导入的 ZFS 池等）、已挂在其他 VM 上（含其分区），或已配置在其他 VM 中。
@@ -388,7 +388,7 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 
 ### 启动时检查
 
-挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。跳过的原因（以及被忽略的格式错误条目）同时出现在 `POST /api/v1/vms/<name>/start` 返回的 `data.warnings` 中。另一个 domain 直通了某块盘的分区时，整块盘也视为被占用。多个 VM 同时启动时，从检查到 `virsh create` 是串行的，不会两个 VM 都拿到同一个设备。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
+挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。跳过的原因（以及被忽略的格式错误条目）同时出现在 `POST /api/v1/vms/<name>/start` 返回的 `data.warnings` 中。另一个 domain 直通了某块盘的分区时，整块盘也视为被占用。多个 VM 同时启动时，从检查到 `virsh create` 是串行的，不会两个 VM 都拿到同一个设备；串行用的是主机范围的文件锁（`/run/lock/unitao-kvm-vm-start.lock`，`flock`），REST 服务和命令行同时启动 VM 也互斥。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
 
 挂载/卸下时如果 VM 还有遗留的已停止 persistent domain，会先 `virsh undefine` 再改 VM JSON；undefine 失败（如带 UEFI nvram）时返回 500 并且不改 JSON，需先手工 `virsh undefine --nvram <vm>`。`start`（以及服务启动时的自动恢复、命令行）遇到已停止的 persistent domain 时同样先 undefine，再按 VM JSON 重建 domain，确保启动时检查一定执行；undefine 失败则拒绝启动，不会直接启动旧 domain。手工配置的 USB hub 不会被直通（启动时跳过并给出警告），因为那会把 hub 后面的所有设备都从主机拿走。VM JSON 由原子写入替换，需要目录的写权限；以 root 运行时保留原文件的所有者。
 

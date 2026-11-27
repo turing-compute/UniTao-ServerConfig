@@ -60,9 +60,9 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 - **`KvmVm`** — 虚拟机生命周期管理器。负责：
   1. 验证虚拟机 JSON 定义（vCPU、RAM、磁盘、网络、操作系统类型/变体、期望状态、Cloud-Init 设置）。
   2. 解析相对路径 — 支持 `{vmPath}` 占位符，在验证时替换为实际的虚拟机目录路径。
-  3. `create_vm()`：已停止的 persistent domain 先 `virsh undefine`（失败则拒绝启动），按 VM JSON 重建，避免 `virsh start` 旧定义绕过直通检查。准备 cloud-init ISO 和磁盘镜像，运行 `virt-install --print-xml` 写入 XML 定义文件（校验定义）；仅当 `vmState` 为 `running` 时才带上直通设备并调用 `virsh create`（它会立即开机，期望 `stopped` 时不建 domain，避免开机一瞬间再被 destroy）。直通检查到 `virsh create` 在模块级 `_start_lock` 内串行执行。
+  3. `create_vm()`：已停止的 persistent domain 先 `virsh undefine`（失败则拒绝启动），按 VM JSON 重建，避免 `virsh start` 旧定义绕过直通检查。准备 cloud-init ISO 和磁盘镜像，运行 `virt-install --print-xml` 写入 XML 定义文件（校验定义）；仅当 `vmState` 为 `running` 时才带上直通设备并调用 `virsh create`（它会立即开机，期望 `stopped` 时不建 domain，避免开机一瞬间再被 destroy）。直通检查到 `virsh create` 在 `host_start_lock()` 内串行执行：线程锁 `_start_lock` 加 `/run/lock/unitao-kvm-vm-start.lock` 上的 `flock`，REST 服务与命令行跨进程也互斥。期间如果 domain 自己退出（来宾关机），undefine 失败也照常继续创建。
   4. `sync_vm_state()`：通过 `virsh destroy` / `virsh start` 调和虚拟机的运行/停止状态。
-  5. `delete_vm()`：如果虚拟机存在则调用 `virsh destroy` 销毁。
+  5. `delete_vm()`：domain 运行中则 `virsh destroy`；仍存在（persistent domain）则 `virsh undefine --nvram`，失败再试 `virsh undefine`，domain 仍在时抛 `SystemError`。
   6. Cloud-Init 支持：生成 `user-data`、`meta-data` 和 `network-config` YAML 文件，通过 `genisoimage` 打包成 `cidata` ISO 文件，并作为 cdrom 挂载。同时将虚拟机 JSON 和网络 JSON 包含在 ISO 中以便自文档化。
   7. `hostCPU` 关键字：当存在且为 `true` 时，向 virt-install 添加 `--cpu host` 以启用 CPU 直通模式。
   8. `installIsoPath` 关键字：挂载安装 ISO 为 cdrom，并设置启动顺序 `--boot hd,cdrom`（空白盘不可启动时进入安装程序，装好后直接从硬盘启动）。REST 层通过 `installIso` 引用 `kvm_iso` 实体，`POST /vms/<name>/eject-iso` 卸载。

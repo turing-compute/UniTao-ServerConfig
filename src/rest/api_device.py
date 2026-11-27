@@ -53,7 +53,8 @@ def managed_claims(app) -> dict:
             claims["usb"].setdefault(key, []).append(vm_name)
         for device in device_entries(vm_data, KvmVm.Keyword.BlockDevices):
             path = device.get(KvmVm.Keyword.Path) if isinstance(device, dict) else None
-            if not isinstance(path, str) or not os.path.exists(path):
+            # Same rule as start-time validation: an entry the VM ignores claims nothing.
+            if not KvmVm.valid_block_path(path) or not os.path.exists(path):
                 continue
             name = os.path.basename(os.path.realpath(path))
             claims["block"].setdefault(name, []).append(vm_name)

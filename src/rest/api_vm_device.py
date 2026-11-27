@@ -42,7 +42,7 @@ vm_device_bp = Blueprint("vm_device", __name__)
 _claim_lock = threading.Lock()
 
 _KEY_PATTERN = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})$")
-_HEX4 = re.compile(r"^(0x)?[0-9a-fA-F]{1,4}$")
+_HEX4 = re.compile(r"^(0[xX])?[0-9a-fA-F]{1,4}$")
 
 
 def _get_logger() -> logging.Logger:
@@ -421,10 +421,11 @@ def attach_vm_block(name: str):
             "Provide 'device' (disk id from GET /api/v1/devices?type=block) "
             f"or 'path' ({KvmVm.BlockByIdDir}<name>)", 400)
     if path is not None:
-        if (not isinstance(path, str) or not path.startswith(KvmVm.BlockByIdDir)
-                or not KvmVm.valid_block_key(path[len(KvmVm.BlockByIdDir):])):
+        if not KvmVm.valid_block_path(path):
             return _patch_error("VALIDATION_ERROR",
-                                f"Invalid path '{path}', expect {KvmVm.BlockByIdDir}<name>", 400)
+                                f"Invalid path '{path}', expect {KvmVm.BlockByIdDir}<name> "
+                                f"(no ',' or whitespace; not a content-derived link such as "
+                                f"lvm-pv-uuid-*, which the guest can make disappear)", 400)
 
     with _get_vm_lock(name), _claim_lock:
         vm_data = read_entity_data(current_app, "vm", name)
@@ -447,7 +448,7 @@ def attach_vm_block(name: str):
                 return _patch_error("DEVICE_NOT_FOUND", f"Disk '{device_id}' not found on host", 404)
             disk = matches[0]
             path = disk["byIdPath"]
-            if path is not None and not KvmVm.valid_block_key(os.path.basename(path)):
+            if path is not None and not KvmVm.valid_block_path(path):
                 path = None  # a name start-time validation would reject
             if path is None:
                 return _patch_error(
@@ -512,7 +513,9 @@ def attach_vm_block(name: str):
 def detach_vm_block(name: str, key: str):
     """Remove a passthrough disk from a stopped VM; the next start no longer has it."""
     logger = _get_logger()
-    if not KvmVm.valid_block_key(key):
+    # Looser than attach on purpose: an entry that start-time validation ignores
+    # (hand-edited, or recorded before a rule was added) must still be removable.
+    if key in ("", ".", "..") or "/" in key:
         return _patch_error("VALIDATION_ERROR", f"Invalid disk key '{key}', expect a {KvmVm.BlockByIdDir} name", 400)
 
     with _get_vm_lock(name):

@@ -8,6 +8,8 @@
 #########################################################################################
 
 import argparse
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -30,7 +32,41 @@ ET.register_namespace("libosinfo", "http://libosinfo.org/xmlns/libvirt/domain/1.
 
 # Held from the passthrough check to `virsh create`: the check only sees VMs whose
 # domain already exists, so two VMs starting together could both take a device.
+# The thread lock orders starts inside one process (REST); the flock on a host-wide
+# file orders them across processes (REST service and CLI runs).
 _start_lock = threading.Lock()
+_StartLockDirs = ("/run/lock", "/var/lock", "/tmp")
+_StartLockName = "unitao-kvm-vm-start.lock"
+
+
+def _start_lock_path() -> str:
+    """The first lock dir that exists; every process picks the same one."""
+    for directory in _StartLockDirs:
+        if os.path.isdir(directory):
+            return os.path.join(directory, _StartLockName)
+    return os.path.join(_StartLockDirs[-1], _StartLockName)
+
+
+@contextlib.contextmanager
+def host_start_lock():
+    """Serialize passthrough check + `virsh create` across threads and processes."""
+    with _start_lock:
+        path = _start_lock_path()
+        # O_RDONLY is enough for flock; 0666 so a root-created file still opens
+        # for a non-root CLI user (and vice versa).
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT, 0o666)
+        try:
+            try:
+                os.fchmod(fd, 0o666)
+            except OSError:
+                pass  # created by another user: its mode is theirs to keep
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 class KvmVm:
     class Keyword:
@@ -259,9 +295,23 @@ class KvmVm:
 
     @staticmethod
     def valid_block_key(name) -> bool:
-        """A /dev/disk/by-id link name: no '/', no whitespace, not '.' or '..'."""
+        """A /dev/disk/by-id link name: no '/', no whitespace, not '.' or '..'.
+
+        No ',' either: the path goes into virt-install `--disk path=...,format=raw`,
+        which splits on commas, so a comma would add options.
+        """
         return (isinstance(name, str) and name not in ("", ".", "..")
-                and "/" not in name and not any(c.isspace() for c in name))
+                and "/" not in name and "," not in name and not any(c.isspace() for c in name))
+
+    @staticmethod
+    def valid_block_path(path) -> bool:
+        """A blockDevices path that may be recorded and used: /dev/disk/by-id/<name>
+        with a valid name that is not derived from disk contents (lvm-pv-uuid-...,
+        which the guest can make disappear by rewriting the disk)."""
+        if not isinstance(path, str) or not path.startswith(KvmVm.BlockByIdDir):
+            return False
+        name = path[len(KvmVm.BlockByIdDir):]
+        return KvmVm.valid_block_key(name) and not name.startswith(KvmDevice._ByIdContentPrefixes)
 
     def validate_block_devices(self):
         """blockDevices: optional list of {path} where path is a /dev/disk/by-id/ link.
@@ -282,8 +332,7 @@ class KvmVm:
         for device in block_devices:
             problem = None
             path = device.get(self.Keyword.Path, None) if isinstance(device, dict) else None
-            if (not isinstance(path, str) or not path.startswith(self.BlockByIdDir)
-                    or not self.valid_block_key(path[len(self.BlockByIdDir):])):
+            if not self.valid_block_path(path):
                 problem = f"[{self.Keyword.Path}] should be a {self.BlockByIdDir}<name> path"
             elif self.block_device_key(device) in seen:
                 problem = "duplicate"
@@ -421,13 +470,31 @@ class KvmVm:
         self.create_vm()
         self.sync_vm_state()
     
+    def domain_exists(self) -> bool:
+        return self.VmName in Util.run_command("virsh list --name --all").stdout_lines
+
     def delete_vm(self):
-        cmd_result = Util.run_command("virsh list --name --all")
-        if self.VmName not in cmd_result.stdout_lines:
+        if not self.domain_exists():
             self.log.info(f"VM[{self.VmName}] not in virsh list. Done")
             return
-        self.log.info(f"run virsh to destroy VM[{self.VmName}]")
-        Util.run_command(f"virsh destroy {self.VmName}")
+        if self.vm_running():
+            self.log.info(f"run virsh to destroy VM[{self.VmName}]")
+            Util.run_command(f"virsh destroy {self.VmName}")
+        # A transient domain is gone now; a persistent one (older version, or
+        # defined by hand) is still defined and must be undefined too.
+        if not self.domain_exists():
+            return
+        self.log.info(f"VM[{self.VmName}] has a persistent domain, undefine it")
+        errors = []
+        for cmd in (f"virsh undefine --nvram {self.VmName}", f"virsh undefine {self.VmName}"):
+            try:
+                Util.run_command(cmd)
+                return
+            except SystemError as e:
+                errors.append(str(e))
+                if not self.domain_exists():
+                    return
+        raise SystemError(f"Cannot undefine persistent domain of VM [{self.VmName}]: {'; '.join(errors)}")
 
     def create_ci_iso(self):
         if not self.VmData[self.Keyword.UseCloudInit]:
@@ -721,10 +788,14 @@ class KvmVm:
             try:
                 Util.run_command(f"virsh undefine {self.VmName}")
             except SystemError as e:
-                raise SystemError(
+                # A transient domain that exited between the two list calls (guest
+                # shut itself down) looks the same and is simply gone now.
+                if self.domain_exists():
+                    raise SystemError(
                     f"VM [{self.VmName}] has a persistent domain that cannot be undefined; "
                     f"refusing to start it unchecked (undefine it by hand, e.g. "
                     f"`virsh undefine --nvram {self.VmName}`): {e}") from e
+                self.log.info(f"VM[{self.VmName}] domain went away meanwhile, build it")
         vm_path = self.VmData[self.Keyword.VmPath]
         self.log.info(f"make sure VM path exists.[{vm_path}]")
         Util.run_command(f"mkdir -p {vm_path}")
@@ -742,7 +813,7 @@ class KvmVm:
             self.log.info(f"VM [{self.VmName}] desired state is stopped: definition validated, "
                           f"domain is created on start")
             return
-        with _start_lock:
+        with host_start_lock():
             vm_def_file = self._write_domain_xml(vm_path, passthrough=True)
             self.log.info(f"Create vm [{self.VmName}] using definition XML. [{vm_def_file}]")
             Util.run_command(f"virsh create {vm_def_file}")
