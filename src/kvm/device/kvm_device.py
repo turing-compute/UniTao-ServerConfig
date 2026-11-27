@@ -35,6 +35,7 @@ class KvmDevice:
 
     SysUsbDir = "/sys/bus/usb/devices"
     SysBlockDir = "/sys/block"
+    DevDir = "/dev"
     DiskByIdDir = "/dev/disk/by-id"
 
     # bDeviceClass / bInterfaceClass codes (USB-IF)
@@ -87,7 +88,7 @@ class KvmDevice:
 
         attached = KvmDevice.attached_devices(logger)
         usb_devices = KvmDevice.discover_usb()
-        block_devices = KvmDevice.discover_block()
+        block_devices = KvmDevice.discover_block(logger)
         KvmDevice._resolve_state(usb_devices, block_devices, attached)
 
         result = {}
@@ -136,9 +137,9 @@ class KvmDevice:
         return devices
 
     @staticmethod
-    def discover_block() -> list:
+    def discover_block(logger: logging.Logger = None) -> list:
         """Whole disks from lsblk, with partitions/children and host mountpoints."""
-        tree = KvmDevice._lsblk()
+        tree = KvmDevice._lsblk(logger)
         by_id = KvmDevice._by_id_map()
         usb_of = KvmDevice._block_usb_parent()
         devices = []
@@ -151,7 +152,7 @@ class KvmDevice:
             mountpoints = []
             host_uses = []
             KvmDevice._collect_usage(node, mountpoints, host_uses)
-            path = node.get("path") or f"/dev/{name}"
+            path = os.path.join(KvmDevice.DevDir, name)
             devices.append({
                 "id": name,
                 "path": path,
@@ -340,16 +341,23 @@ class KvmDevice:
         return result
 
     @staticmethod
-    def _lsblk() -> list:
-        columns = "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,FSTYPE"
+    def _lsblk(logger: logging.Logger = None) -> list:
+        """lsblk tree, or [] (with a warning) when lsblk is missing or fails.
+
+        No PATH column (util-linux >= 2.33 only): the path is <DevDir>/<NAME>.
+        """
+        columns = "NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,FSTYPE"
+        errors = []
         # MOUNTPOINTS (util-linux >= 2.37) lists every mount; fall back to MOUNTPOINT.
         for mount_col in ("MOUNTPOINTS", "MOUNTPOINT"):
             try:
                 result = Util.run_command(f"lsblk -J -b -o {columns},{mount_col}")
                 data = json.loads("\n".join(result.stdout_lines))
                 return data.get("blockdevices", []) or []
-            except SystemError:
-                continue
+            except (SystemError, OSError, ValueError) as e:
+                errors.append(str(e))
+        if logger:
+            logger.warning(f"lsblk failed, no block devices listed: {errors[-1]}")
         return []
 
     @staticmethod

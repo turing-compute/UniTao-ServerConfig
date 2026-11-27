@@ -65,7 +65,8 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
   7. `hostCPU` 关键字：当存在且为 `true` 时，向 virt-install 添加 `--cpu host` 以启用 CPU 直通模式。
   8. `installIsoPath` 关键字：挂载安装 ISO 为 cdrom，并设置启动顺序 `--boot hd,cdrom`（空白盘不可启动时进入安装程序，装好后直接从硬盘启动）。REST 层通过 `installIso` 引用 `kvm_iso` 实体，`POST /vms/<name>/eject-iso` 卸载。
   9. `usbDevices` 关键字：`[{"vendorId", "productId"}]`（4 位小写十六进制），USB 直通。不经 virt-install `--hostdev`（设备拔掉时 virt-install 会失败），而是由 `add_usb_hostdevs()` 在 `--print-xml` 输出中追加 `<hostdev type='usb'>`，`startupPolicy='optional'` 使设备不在时 VM 仍可启动。REST 层见 `src/rest/api_vm_device.py`（`GET/POST /vms/<name>/usb`、`DELETE /vms/<name>/usb/<vid>:<pid>`）。**不支持热插拔**：POST/DELETE 要求 VM 已停止，下次启动生效。
-  10. `blockDevices` 关键字：`[{"path"}]`，整块磁盘直通，`path` 必须是 `/dev/disk/by-id/<name>`（`/dev/sdX` 不稳定）。`create_vm_cmd()` 生成 `--disk path=...,format=raw,bus=virtio,cache=none,io=native`；libvirt 的块设备不支持 `startupPolicy`，所以设备不在时直接跳过（记 WARNING），VM 照常启动。REST 层同在 `api_vm_device.py`（`GET/POST /vms/<name>/block`、`DELETE /vms/<name>/block/<by-id 名>`），同样要求 VM 已停止。
+  10. `blockDevices` 关键字：`[{"path"}]`，整块磁盘直通，`path` 必须是 `/dev/disk/by-id/<name>`（`/dev/sdX` 不稳定）。`create_vm_cmd()` 生成 `--disk path=...,format=raw,bus=virtio,cache=none,io=native`。
+     启动时 `resolve_passthrough()` 用 `KvmDevice.discover()` 重新检查 `usbDevices`/`blockDevices`：不在（块设备）、主机上有挂载点/LVM 等、被其他 domain 占用、USB `vendor:product` 重复时跳过并记 WARNING，VM 照常启动（libvirt 的块设备不支持 `startupPolicy`，重复的 USB 会让 `virsh create` 失败）。挂载接口另有跨 VM 的 `_claim_lock`，防止两个 VM 同时认领同一设备。REST 层同在 `api_vm_device.py`（`GET/POST /vms/<name>/block`、`DELETE /vms/<name>/block/<by-id 名>`），同样要求 VM 已停止。
   11. VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`）。网页控制台见 `src/rest/api_console.py`：`GET /api/v1/vms/<name>/console` 提供 noVNC 页面，页面 `POST` 同一路径时启动一次性 `websockify --run-once`（连接断开即退出），VM stop/delete 时清理。
 
 - **`KvmNetwork`** — 虚拟机网络接口配置。支持两种接口类型：

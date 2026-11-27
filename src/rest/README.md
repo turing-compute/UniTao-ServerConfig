@@ -338,6 +338,7 @@ POST /api/v1/vms/<name>/usb
 - 设备 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`，原因同 `/api/v1/devices`：已挂在其他 VM 上、已配置在其他 VM 的 `usbDevices` 中（即使那个 VM 已停止）、USB 硬盘在主机上有挂载点等。挂载前先在主机上 `umount`。
 - 设备不在主机上时返回 404 `DEVICE_NOT_FOUND`；已配置在本 VM 上时返回 200，`attached: false`（幂等）。
 - 启动时设备不在（已拔掉）不影响 VM 启动（`startupPolicy='optional'`），插回后需要重启 VM 才会挂上。
+- 每次启动时还会重新检查（见 [启动时检查](#启动时检查)）：设备已被其他 VM 占用、USB 硬盘在主机上有挂载点、或主机上出现了两个 `vendorId:productId` 相同的设备时，跳过该设备并记 WARNING，VM 照常启动。
 
 卸下：
 
@@ -373,7 +374,7 @@ POST /api/v1/vms/<name>/block
 - 磁盘 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`：主机上有挂载点（含 swap）、承载 LVM/RAID/LUKS/ZFS、已挂在其他 VM 上，或已配置在其他 VM 中。
 - 同一块 USB 硬盘只能用一种方式挂到一个 VM：以块设备配置后，它的 USB 条目也不可挂，反之亦然。
 - 不在主机上时返回 404 `DEVICE_NOT_FOUND`；已配置在本 VM 上（任一 by-id 链接指向同一块盘）时返回 200，`attached: false`。
-- 启动时磁盘不在（如 USB 硬盘已拔掉）会跳过它，VM 照常启动，日志中有 WARNING。
+- 启动时磁盘不在（如 USB 硬盘已拔掉）、已不是整块磁盘、在主机上有挂载点、承载 LVM 等、或已被其他 VM 占用时，跳过它并记 WARNING，VM 照常启动（见 [启动时检查](#启动时检查)）。
 
 卸下（`<by-id 名>` 是 `path` 的最后一段，也是 `GET` 返回的 `key`）：
 
@@ -384,6 +385,17 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 `GET /api/v1/vms/<name>/block` 返回每个已配置磁盘的 `key`、`present`（by-id 路径是否存在）、`hostDevice`（当前对应的内核设备名）、`liveAttached`。
 
 安全拔插流程同 [USB 直通](#usb-直通)：来宾里卸载 → `stop` → `DELETE`（或保留配置）→ 物理拔出。
+
+### 启动时检查
+
+挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。来宾里看不到某个直通设备时，先查 REST 日志。
+
+另外：
+
+- 挂载接口在检查占用和写 VM JSON 期间持有一把所有 VM 共用的锁，两个请求同时把同一设备挂给不同 VM 时只有一个成功。
+- virsh 状态查询失败时，挂载/卸下返回 500 `SYSTEM_COMMAND_FAILED`，不在不确定 VM 是否运行时修改配置。
+- 同一 VM 已以另一种方式配置了这块 USB 硬盘时返回 409，提示先从 `/usb` 或 `/block` 中 DELETE。
+- VM JSON 中格式不对的条目（手工编辑造成）在 `GET` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON；其余接口跳过它们。
 
 ### VM 认证方式
 

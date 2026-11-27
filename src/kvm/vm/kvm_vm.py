@@ -19,6 +19,7 @@ from security.password_gen import generate_password
 from shared.logger import Log
 from shared.utilities import Util
 
+from kvm.device.kvm_device import KvmDevice
 from kvm.image.kvm_image import KvmImage
 from network.bridge.net_bridge import NetBridge
 
@@ -231,11 +232,17 @@ class KvmVm:
         """Identity of a blockDevices entry: the /dev/disk/by-id link name."""
         return os.path.basename(device[KvmVm.Keyword.Path])
 
+    @staticmethod
+    def valid_block_key(name) -> bool:
+        """A /dev/disk/by-id link name: no '/', no whitespace, not '.' or '..'."""
+        return (isinstance(name, str) and name not in ("", ".", "..")
+                and "/" not in name and not any(c.isspace() for c in name))
+
     def validate_block_devices(self):
         """blockDevices: optional list of {path} where path is a /dev/disk/by-id/ link.
 
         by-id only: /dev/sdX names follow probe order and change across replug/reboot.
-        A missing device is not an error here (see create_vm_cmd).
+        A missing or busy device is not an error here (see resolve_passthrough).
         """
         block_devices = self.VmData.get(self.Keyword.BlockDevices, None)
         if block_devices is None:
@@ -248,8 +255,7 @@ class KvmVm:
                 raise ValueError(f"Invalid [{self.Keyword.BlockDevices}] entry [{device}], expect an object")
             path = device.get(self.Keyword.Path, None)
             if (not isinstance(path, str) or not path.startswith(self.BlockByIdDir)
-                    or path == self.BlockByIdDir or "/" in path[len(self.BlockByIdDir):]
-                    or any(c.isspace() for c in path)):
+                    or not self.valid_block_key(path[len(self.BlockByIdDir):])):
                 raise ValueError(f"Invalid [{self.Keyword.BlockDevices}] entry [{device}], "
                                  f"[{self.Keyword.Path}] should be a {self.BlockByIdDir}<name> path")
             key = self.block_device_key(device)
@@ -272,21 +278,73 @@ class KvmVm:
             "</hostdev>"
         )
 
+    def resolve_passthrough(self):
+        """Decide which configured passthrough devices are safe to hand over now.
+
+        Attach-time checks (REST) are not enough: the host may have mounted a disk
+        since, another VM may have started with it, or a second device with the same
+        vendor:product may have been plugged in. A device that is not safe is
+        skipped with a warning and the VM starts without it, like a missing device.
+        Sets self.PassUsb / self.PassBlock.
+        """
+        self.PassUsb, self.PassBlock = [], []
+        usb_cfg = self.VmData.get(self.Keyword.UsbDevices, None) or []
+        block_cfg = self.VmData.get(self.Keyword.BlockDevices, None) or []
+        if not usb_cfg and not block_cfg:
+            return
+        # Runs before this VM's domain exists, so "attached to VM" means another VM.
+        host = KvmDevice.discover(logger=self.log)
+        skip = "VM [" + self.VmName + "] starts without {what}: {why}"
+
+        for device in usb_cfg:
+            key = self.usb_device_key(device)
+            matches = [u for u in host[KvmDevice.Keyword.Types.USB]
+                       if f"{u['vendorId']}:{u['productId']}" == key]
+            if len(matches) > 1:
+                # libvirt refuses to pick one: virsh create would fail.
+                self.log.warning(skip.format(what=f"USB [{key}]", why=(
+                    f"{len(matches)} host devices share it ({', '.join(m['id'] for m in matches)})")))
+            elif matches and not matches[0]["attachable"]:
+                self.log.warning(skip.format(what=f"USB [{key}]", why=matches[0]["reason"]))
+            else:
+                # Not plugged in is fine: startupPolicy='optional'.
+                self.PassUsb.append(device)
+
+        for device in block_cfg:
+            path = device[self.Keyword.Path]
+            if not os.path.exists(path):
+                # libvirt has no startupPolicy for block disks.
+                self.log.warning(skip.format(what=f"disk [{path}]", why="not present"))
+                continue
+            real = os.path.realpath(path)
+            matches = [b for b in host[KvmDevice.Keyword.Types.Block] if b["path"] == real]
+            if not matches:
+                self.log.warning(skip.format(what=f"disk [{path}]", why=f"{real} is not a whole disk"))
+            elif not matches[0]["attachable"]:
+                self.log.warning(skip.format(what=f"disk [{path}]", why=matches[0]["reason"]))
+            else:
+                self.PassBlock.append(device)
+
     def add_usb_hostdevs(self, domain_xml: str) -> str:
-        """Append a <hostdev> per usbDevices entry to the virt-install generated XML.
+        """Append a <hostdev> per usable usbDevices entry to the virt-install generated XML.
 
         Not passed to virt-install as --hostdev: virt-install looks the device up on
         the host and fails when it is unplugged, which startupPolicy='optional' is
         meant to tolerate.
         """
-        usb_devices = self.VmData.get(self.Keyword.UsbDevices, None) or []
-        if not usb_devices:
+        if not hasattr(self, "PassUsb"):
+            self.resolve_passthrough()
+        if not self.PassUsb:
             return domain_xml
-        root = ET.fromstring(domain_xml)
+        try:
+            root = ET.fromstring(domain_xml)
+        except ET.ParseError as e:
+            raise ValueError(f"virt-install --print-xml output is not a single domain XML, "
+                             f"cannot add USB devices: {e}")
         devices = root.find("devices")
         if devices is None:
             devices = ET.SubElement(root, "devices")
-        for device in usb_devices:
+        for device in self.PassUsb:
             devices.append(ET.fromstring(self.usb_hostdev_xml(device)))
         return ET.tostring(root, encoding="unicode")
 
@@ -647,13 +705,9 @@ class KvmVm:
             vm_create_cmd.append(f"  --disk {disk.disk_cmd()}")
         for net in self.Networks:
             vm_create_cmd.append(f"  --network {net.net_cmd()}")
-        for device in self.VmData.get(self.Keyword.BlockDevices, None) or []:
+        self.resolve_passthrough()
+        for device in self.PassBlock:
             path = device[self.Keyword.Path]
-            # libvirt has no startupPolicy for block disks: skip a missing device so
-            # the VM still boots without it (like USB startupPolicy='optional').
-            if not os.path.exists(path):
-                self.log.warning(f"Block device [{path}] not present, VM [{self.VmName}] starts without it")
-                continue
             vm_create_cmd.append(f"  --disk path={path},format=raw,bus=virtio,cache=none,io=native")
         if self.VmData[self.Keyword.UseCloudInit]:
             vm_create_cmd.append(f"  --disk path={self.VmData[self.Keyword.CIIsoPath]},device=cdrom")
