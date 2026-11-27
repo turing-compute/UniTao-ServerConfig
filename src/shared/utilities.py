@@ -1,6 +1,8 @@
 import json
 import os
+import stat
 import subprocess
+import tempfile
 
 
 class ProcessResult:
@@ -102,6 +104,41 @@ class Util:
                 raise ValueError(f"Invalid Mac Address[{macAddr}], [{part}] is not a hex number")
         return mac_parts
     
+    def write_text_atomic(file_path: str, text: str):
+        """Replace a file's content atomically (temp file in the same dir + rename).
+
+        Readers never see a truncated or half-written file. The target's mode is
+        kept (0644 for a new file), and so are its owner and group when running as
+        root; a symlink is written through, like a plain open("w") would. Unlike
+        open("w"), this needs write permission on the directory. The temp name ends
+        in .tmp so *.json listings skip it.
+        """
+        target = os.path.realpath(file_path)
+        directory = os.path.dirname(target)
+        owner = None
+        try:
+            st = os.stat(target)
+            mode = stat.S_IMODE(st.st_mode)
+            owner = (st.st_uid, st.st_gid)
+        except FileNotFoundError:
+            mode = 0o644
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(target)}-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w") as fp:
+                fp.write(text)
+            os.chmod(tmp_path, mode)
+            if owner is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
+                os.chown(tmp_path, *owner)
+            os.replace(tmp_path, target)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    def write_json_atomic(file_path: str, data):
+        """json.dump(data, indent=4) to file_path atomically (see write_text_atomic)."""
+        Util.write_text_atomic(file_path, json.dumps(data, indent=4))
+
     def write_file(file_path: str, mode: str, file_data):
         if isinstance(file_data, list):
             file_data_str = "\n".join(file_data)

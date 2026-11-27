@@ -104,11 +104,14 @@ def read_entity_data(app, data_type: str, name: str) -> dict:
 
 
 def write_entity_data(app, data_type: str, name: str, data: dict):
-    """Write JSON data for an entity, creating directories as needed."""
+    """Write JSON data for an entity, creating directories as needed.
+
+    Atomic (temp file + rename): readers such as the device-claim scan read other
+    VMs' JSON without their per-VM lock and must never see a half-written file.
+    """
     path = get_entity_path(app, data_type, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=4)
+    Util.write_json_atomic(path, data)
 
 
 def delete_entity(app, data_type: str, name: str) -> bool:

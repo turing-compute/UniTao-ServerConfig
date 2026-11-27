@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import random
-import tempfile
 import threading
 
 from extlib.flask import Blueprint, request, jsonify, current_app
@@ -181,23 +180,13 @@ def _read_text(path: str) -> str:
 
 
 def _atomic_write_json(path: str, data: dict):
-    directory = os.path.dirname(path)
-    fd, tmp_path = tempfile.mkstemp(prefix=".patch-", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=4)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
+    Util.write_json_atomic(path, data)
 
 
 def _restore_files(backups: dict, logger: logging.Logger):
     for path, content in backups.items():
         try:
-            with open(path, "w") as f:
-                f.write(content)
+            Util.write_text_atomic(path, content)
         except OSError as e:
             logger.error("Failed to restore [%s]: %s", path, e)
 
@@ -624,8 +613,8 @@ def create_vm():
                            use_cloud_init=use_cloud_init,
                            install_iso=install_iso, install_iso_path=install_iso_path)
     vm_path = vm_json_path(current_app, vm_id)
-    with open(vm_path, "w") as f:
-        json.dump(vm_json, f, indent=4)
+    # Atomic: the device-claim scan reads other VMs' JSON without their lock.
+    Util.write_json_atomic(vm_path, vm_json)
 
     # Preserve the original request for traceability.
     request_path = os.path.join(data_dir, "request.json")
@@ -1199,7 +1188,9 @@ def start_vm(name: str):
 
         return jsonify({
             "success": True,
-            "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Running}
+            # Passthrough devices skipped at start (busy, missing, malformed...).
+            "data": {"name": name, "vmState": KvmVm.Keyword.VmStates.Running,
+                     "warnings": getattr(vm, "PassWarnings", [])}
         })
 
 

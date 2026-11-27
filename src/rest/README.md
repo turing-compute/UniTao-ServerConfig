@@ -161,6 +161,12 @@ curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
 | POST | `/api/v1/vms/<name>/start` | 启动 VM |
 | POST | `/api/v1/vms/<name>/stop` | 停止 VM |
 | POST | `/api/v1/vms/<name>/eject-iso` | 卸载安装 ISO（VM 需已停止） |
+| GET | `/api/v1/vms/<name>/usb` | 列出 VM 配置的 USB 直通设备 |
+| POST | `/api/v1/vms/<name>/usb` | 把主机 USB 设备挂到 VM（VM 需已停止），见 [USB 直通](#usb-直通) |
+| DELETE | `/api/v1/vms/<name>/usb/<vendorId>:<productId>` | 卸下 USB 设备（VM 需已停止） |
+| GET | `/api/v1/vms/<name>/block` | 列出 VM 配置的直通磁盘 |
+| POST | `/api/v1/vms/<name>/block` | 把主机整块磁盘直通给 VM（VM 需已停止），见 [块设备直通](#块设备直通) |
+| DELETE | `/api/v1/vms/<name>/block/<by-id 名>` | 卸下直通磁盘（VM 需已停止） |
 | POST | `/api/v1/vms/<name>/commit` | 将 qcow2 disk 变更提交到 backing image |
 | GET | `/api/v1/vms/<name>/console` | 网页 VNC 控制台（浏览器打开） |
 | POST | `/api/v1/vms/<name>/console` | 为控制台页面启动一次性 websockify（页面自动调用） |
@@ -310,6 +316,92 @@ sudo apt-get install -y novnc websockify
 | `consolePortMax` | `6099` | websockify 端口段终点（同时打开的控制台数上限） |
 
 未安装 websockify / noVNC 或端口用尽时返回 503 `CONSOLE_UNAVAILABLE`。
+
+### USB 直通
+
+把主机上的 USB 设备（如移动硬盘）挂给 VM。**不支持热插拔**：挂载和卸下都要求 VM 已停止（`vmState` 为 `stopped` 且 virsh 中未运行，否则 409 `VM_RUNNING`），下次 `start` 时生效。
+
+先用 [`GET /api/v1/devices?type=usb`](#主机设备) 找到设备，再按 `id` 或 `vendorId`/`productId` 挂载：
+
+```json
+POST /api/v1/vms/<name>/usb
+{"device": "2-1"}
+```
+
+```json
+POST /api/v1/vms/<name>/usb
+{"vendorId": "0bc2", "productId": "3343"}
+```
+
+- 写入 VM JSON 的 `usbDevices`（`[{"vendorId", "productId", "description"}]`），每次启动 VM 时据此生成 `<hostdev type='usb'>`。返回 201。
+- 按 `vendorId:productId` 匹配，所以换个 USB 口、重新插拔都不影响。主机上有两个 `vendorId:productId` 相同的设备时返回 409 `AMBIGUOUS_DEVICE`（无法区分）。
+- 设备 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`，原因同 `/api/v1/devices`：已挂在其他 VM 上、已配置在其他 VM 的 `usbDevices` 中（即使那个 VM 已停止）、USB 硬盘在主机上有挂载点等。挂载前先在主机上 `umount`。
+- 设备不在主机上时返回 404 `DEVICE_NOT_FOUND`；已配置在本 VM 上时返回 200，`attached: false`（幂等）。
+- 启动时设备不在（已拔掉）不影响 VM 启动（`startupPolicy='optional'`），插回后需要重启 VM 才会挂上。
+- 每次启动时还会重新检查（见 [启动时检查](#启动时检查)）：设备已被其他 VM 占用、USB 硬盘在主机上有挂载点、或主机上出现了两个 `vendorId:productId` 相同的设备时，跳过该设备并记 WARNING，VM 照常启动。
+
+卸下：
+
+```
+DELETE /api/v1/vms/<name>/usb/0bc2:3343
+```
+
+从 `usbDevices` 中移除，下次启动不再挂载。
+
+**安全拔插流程**：在来宾里卸载文件系统 → `POST /api/v1/vms/<name>/stop` → `DELETE` 卸下（或保留配置）→ 物理拔出。插回：插上 → 确认 `attachable` 为 `true` → VM 已停止时 `POST` 挂载 → `start`。VM 运行中物理拔线等同于直接拔掉物理机上的硬盘，来宾若仍挂载着会丢数据。
+
+`GET /api/v1/vms/<name>/usb` 返回每个已配置设备的 `present`（主机上是否插着）、`hostDevices`（对应的主机 USB `id`）、`liveAttached`（当前是否挂在运行中的 VM 上）。
+
+### 块设备直通
+
+把主机上的整块磁盘（SATA/NVMe/USB 硬盘）作为 virtio 磁盘交给 VM，性能比 USB 直通好，来宾里是 `/dev/vdX`。与 USB 直通一样**不支持热插拔**：挂载和卸下都要求 VM 已停止，下次 `start` 时生效。
+
+先用 [`GET /api/v1/devices?type=block`](#主机设备) 找到磁盘，再按 `id` 或 by-id 路径挂载：
+
+```json
+POST /api/v1/vms/<name>/block
+{"device": "sdb"}
+```
+
+```json
+POST /api/v1/vms/<name>/block
+{"path": "/dev/disk/by-id/usb-Seagate_Expansion_HDD_NAAB1-0:0"}
+```
+
+- 写入 VM JSON 的 `blockDevices`（`[{"path", "description"}]`）。`path` 一律记录 `/dev/disk/by-id/...`：按 `id` 挂载时取该磁盘的 `byIdPath`，`/dev/sdX` 会随插拔、重启变化，不能用。磁盘没有 by-id 链接时返回 409 `NO_STABLE_PATH`。`path` 不能含 `,` 或空白（virt-install 的 `--disk` 按逗号拆分选项），也不能是由盘上内容生成的链接（`lvm-pv-uuid-*` 等，来宾重写磁盘后会消失），否则返回 400；启动时和占用统计也按同一规则忽略这类条目。`DELETE` 接受任何不含 `/` 的名字，旧的不合规条目也能删除。删除 VM 时，persistent domain 会被一并 undefine。
+- 启动时生成 `--disk path=<by-id>,format=raw,bus=virtio,cache=none,io=native`。有直通盘时，系统盘和安装 ISO 使用显式的逐设备启动顺序（`boot_order`），直通盘不参与启动，避免固件从直通盘上的系统启动而跳过安装程序。
+- 只能直通整块磁盘；by-id 路径指向分区（`-partN`）或不在列表中的设备时返回 400。
+- 磁盘 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`：主机上有挂载点（含 swap）、主机正在使用（已激活的 LVM/RAID/加密、holder、已导入的 ZFS 池等）、已挂在其他 VM 上（含其分区），或已配置在其他 VM 中。
+- 同一块 USB 硬盘只能用一种方式挂到一个 VM：以块设备配置后，它的 USB 条目也不可挂，反之亦然。
+- 不在主机上时返回 404 `DEVICE_NOT_FOUND`；已配置在本 VM 上（任一 by-id 链接指向同一块盘）时返回 200，`attached: false`。
+- 启动时磁盘不在（如 USB 硬盘已拔掉）、已不是整块磁盘、在主机上有挂载点或正在被主机使用、或已被其他 VM 占用时，跳过它并记 WARNING，VM 照常启动（见 [启动时检查](#启动时检查)）。
+
+卸下（`<by-id 名>` 是 `path` 的最后一段，也是 `GET` 返回的 `key`）：
+
+```
+DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
+```
+
+`GET /api/v1/vms/<name>/block` 返回每个已配置磁盘的 `key`、`present`（by-id 路径是否存在）、`hostDevice`（当前对应的内核设备名）、`liveAttached`。
+
+安全拔插流程同 [USB 直通](#usb-直通)：来宾里卸载 → `stop` → `DELETE`（或保留配置）→ 物理拔出。
+
+### 启动时检查
+
+挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。跳过的原因（以及被忽略的格式错误条目）同时出现在 `POST /api/v1/vms/<name>/start` 返回的 `data.warnings` 中。另一个 domain 直通了某块盘的分区时，整块盘也视为被占用。多个 VM 同时启动时，从检查到 `virsh create` 是串行的，不会两个 VM 都拿到同一个设备；串行用的是主机范围的文件锁（`/run/lock/unitao-kvm-vm-start.lock`，`flock`），REST 服务和命令行同时启动 VM 也互斥。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
+
+挂载/卸下时如果 VM 还有遗留的已停止 persistent domain，会先 `virsh undefine` 再改 VM JSON；undefine 失败（如带 UEFI nvram）时返回 500 并且不改 JSON，需先手工 `virsh undefine --nvram <vm>`。`start`（以及服务启动时的自动恢复、命令行）遇到已停止的 persistent domain 时同样先 undefine，再按 VM JSON 重建 domain，确保启动时检查一定执行；undefine 失败则拒绝启动，不会直接启动旧 domain。手工配置的 USB hub 不会被直通（启动时跳过并给出警告），因为那会把 hub 后面的所有设备都从主机拿走。VM JSON 由原子写入替换，需要目录的写权限；以 root 运行时保留原文件的所有者。
+
+只有 `start` 才会生成 domain：期望状态为 `stopped` 时（`POST /vms` 新建、对已停止的 VM 调 `stop`、PATCH 调和等），准备 cloud-init ISO 和磁盘镜像，并运行 `virt-install --print-xml` 校验定义、写出 `vm_def_<vm>.xml`（不含直通设备），但不执行 `virsh create`。以前这些操作会让 VM 开机一瞬间再断电，直通设备会被来宾短暂占用，可能损坏数据。定义错误仍在 `POST /vms` 时暴露。
+
+另外：
+
+- 挂载接口在检查占用和写 VM JSON 期间持有一把所有 VM 共用的锁，两个请求同时把同一设备挂给不同 VM 时只有一个成功。
+- virsh 状态查询失败时，挂载/卸下返回 500 `SYSTEM_COMMAND_FAILED`，不在不确定 VM 是否运行时修改配置。
+- 同一 VM 已以另一种方式配置了这块 USB 硬盘时返回 409，提示先从 `/usb` 或 `/block` 中 DELETE。
+- VM JSON 中格式不对的条目（手工编辑造成：大写十六进制、`/dev/sdX` 路径、重复等）不会阻止 `start`/`stop`/`delete`：启动时跳过并记 WARNING（`Ignore [usbDevices] entry ...`），JSON 原样保留。`GET /vms/<name>/usb|block` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON。`usbDevices`/`blockDevices` 整个不是列表时，该 VM 的挂载/卸下返回 409 `INVALID_VM_DATA`，其他 VM 和 `GET /api/v1/devices` 不受影响。
+- 某个 VM 的 JSON 读不出来时，它占用了哪些设备无从得知：`GET /api/v1/devices` 多出 `errors.claims`，所有设备都标为不可挂，挂载接口一律拒绝。VM JSON 的写入（REST 和 `KvmVm` 写回 cloud-init 登录信息）都是原子的（临时文件 + rename，保留原文件权限），正常读写不会读到写了一半的文件；扫描期间被删除的 VM 视为没有占用。
+- `lsblk` 不可用时，`POST /vms/<name>/block` 返回 500 `SYSTEM_COMMAND_FAILED`。
 
 ### VM 认证方式
 
@@ -477,6 +569,82 @@ GET /api/v1/vms/<name>/inventory/<file>
 ```
 
 `timestamp` 为文件最后修改时间，可用于变更检测。
+
+---
+
+## 主机设备
+
+列出主机上可以挂给 VM 的设备（只读，不做挂载）：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/devices` | 列出 USB 设备和整块磁盘 |
+| GET | `/api/v1/devices?type=usb` | 只列 USB 设备（`type=block` 只列磁盘） |
+| GET | `/api/v1/devices?attachable=true` | 只列当前可挂载的设备 |
+
+两类设备对应两种挂法：
+
+- **`usb`**：USB 直通（`<hostdev type='usb'>`，按 `vendorId:productId` 匹配），来宾看到的是真实 USB 设备。来自 `/sys/bus/usb/devices`，hub（含 root hub）不列出。
+- **`block`**：块设备直通（`<disk type='block'>`），来宾看到的是一块磁盘。来自 `lsblk`，只列整块磁盘，`loop`/`zram`/`nbd`/`sr`/`dm-`/`md` 不列出。挂载时用 `byIdPath`（`/dev/disk/by-id/...`），设备重新插拔后 `/dev/sdX` 可能变化，by-id 路径不会。`byIdPath` 依次优先 `usb-`、`ata-`、`nvme-`、`scsi-`、`wwn-`、`mmc-`、`virtio-`；由盘上内容生成的链接（`lvm-pv-uuid-`、`md-uuid-`、`md-name-`、`dm-uuid-`、`dm-name-`）不会被选用，因为来宾重写磁盘后它们会消失。
+
+USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ 磁盘的 `usbDevice`）。
+
+每个设备都带 `attachable`；为 `false` 时 `reason` 说明原因：
+
+| 原因 | 说明 |
+|------|------|
+| `attached to VM [<vm>]` | 已挂在某个 libvirt domain 上（`virsh dumpxml` 中有对应的 `hostdev`/`disk`）。USB 硬盘无论以哪种方式挂出，两边都会标记 |
+| `configured on VM [<vm>]` | 已写入某个受管 VM JSON 的 `usbDevices` 或 `blockDevices`（见 [USB 直通](#usb-直通)、[块设备直通](#块设备直通)）。该 VM 停止时没有 domain，但下次启动会再次占用。`configuredOn` 列出这些 VM；USB 硬盘无论以哪种方式配置，两边都会标记 |
+| `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
+| `in use by host: ...` | 主机正在使用：已激活的 LVM/加密/RAID 等子设备；磁盘或分区上叠有内核 holder（`/sys/block/<dev>/holders` 非空，如 dm/md/bcache）；所属 ZFS 池已在主机上导入（`zpool list`；`zpool` 命令失败时保守地视为占用）；或是多盘 btrfs 中未显示挂载点的成员（与已挂载的 btrfs 同 UUID）。只有签名（如 `LVM2_member`、`crypto_LUKS`）而未激活不算：来宾可能在自己的直通盘上建了这些结构 |
+| `cannot check VM attachments: ...` | `virsh list` 或某个 domain 的 `virsh dumpxml` 失败，无法确认设备是否已被 VM 占用（同时出现在 `errors.attached`）。主机上没有 virsh 时视为没有 domain；扫描期间被停止/删除的 domain 直接跳过。domain 按 UUID 查询，名字带空格的 domain 也能正常检查 |
+| `cannot check host use of ...: lsblk failed` | USB 设备带有磁盘，但 `lsblk` 不可用，无法确认主机是否在用 |
+| `cannot read VM JSON of [<vm>] ...` | 某个受管 VM 的 JSON 读不出来，设备占用情况未知（同时出现在 `errors.claims`） |
+
+USB 设备下的光驱等不在 `block` 列表中的设备（如 `sr0`）也会检查：光盘在主机上挂载着时，该 USB 设备不可挂。
+
+主机和 VM 同时写同一块盘会损坏数据，所以挂载前先在主机上 `umount`。
+
+```json
+GET /api/v1/devices
+{
+  "success": true,
+  "data": {
+    "usb": [
+      {
+        "id": "2-1",
+        "vendorId": "0bc2", "productId": "3343",
+        "bus": 2, "device": 3,
+        "manufacturer": "Seagate", "product": "Expansion HDD", "serial": "NAAB1",
+        "speedMbps": 5000,
+        "classes": ["massStorage"],
+        "blockDevices": ["sdb"],
+        "configuredOn": [],
+        "attachedTo": null, "attachable": true, "reason": null
+      }
+    ],
+    "block": [
+      {
+        "id": "sdb",
+        "path": "/dev/sdb",
+        "byIdPath": "/dev/disk/by-id/usb-Seagate_Expansion_HDD_NAAB1-0:0",
+        "sizeBytes": 4000787030016,
+        "model": "Expansion HDD", "serial": "NAAB1",
+        "transport": "usb", "removable": false,
+        "usbDevice": "2-1",
+        "partitions": [{"name": "sdb1", "type": "part", "fsType": "ntfs", "sizeBytes": 4000785104896, "mountpoints": []}],
+        "mountpoints": [], "hostUse": [],
+        "configuredOn": [],
+        "attachedTo": null, "attachable": true, "reason": null
+      }
+    ]
+  }
+}
+```
+
+USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。`lsblk` 不可用时 `block` 为空列表，并多出 `"errors": {"block": "lsblk failed: ..."}`。`speedMbps` 为数字（如 `480`、`1.5`），读不到时为 `null`。
+
+命令行同样可用：`./src/runpy.sh src/kvm/device/kvm_device.py [--type usb|block]`。
 
 ---
 

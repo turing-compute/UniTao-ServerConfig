@@ -8,17 +8,65 @@
 #########################################################################################
 
 import argparse
+import contextlib
+import fcntl
 import json
 import logging
 import os
+import re
+import threading
+import xml.etree.ElementTree as ET
 
 from security.key_manager import KeyManager
 from security.password_gen import generate_password
 from shared.logger import Log
 from shared.utilities import Util
 
+from kvm.device.kvm_device import KvmDevice
 from kvm.image.kvm_image import KvmImage
 from network.bridge.net_bridge import NetBridge
+
+# virt-install writes <libosinfo:libosinfo> into <metadata>; keep the prefix when
+# the generated domain XML is rewritten (add_usb_hostdevs).
+ET.register_namespace("libosinfo", "http://libosinfo.org/xmlns/libvirt/domain/1.0")
+
+# Held from the passthrough check to `virsh create`: the check only sees VMs whose
+# domain already exists, so two VMs starting together could both take a device.
+# The thread lock orders starts inside one process (REST); the flock on a host-wide
+# file orders them across processes (REST service and CLI runs).
+_start_lock = threading.Lock()
+_StartLockDirs = ("/run/lock", "/var/lock", "/tmp")
+_StartLockName = "unitao-kvm-vm-start.lock"
+
+
+def _start_lock_path() -> str:
+    """The first lock dir that exists; every process picks the same one."""
+    for directory in _StartLockDirs:
+        if os.path.isdir(directory):
+            return os.path.join(directory, _StartLockName)
+    return os.path.join(_StartLockDirs[-1], _StartLockName)
+
+
+@contextlib.contextmanager
+def host_start_lock():
+    """Serialize passthrough check + `virsh create` across threads and processes."""
+    with _start_lock:
+        path = _start_lock_path()
+        # O_RDONLY is enough for flock; 0666 so a root-created file still opens
+        # for a non-root CLI user (and vice versa).
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT, 0o666)
+        try:
+            try:
+                os.fchmod(fd, 0o666)
+            except OSError:
+                pass  # created by another user: its mode is theirs to keep
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 class KvmVm:
     class Keyword:
@@ -37,6 +85,11 @@ class KvmVm:
         InstallIsoPath = "installIsoPath"
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
+        UsbDevices = "usbDevices"
+        VendorId = "vendorId"
+        ProductId = "productId"
+        BlockDevices = "blockDevices"
+        Path = "path"
         Login = "login"
 
         class AuthTypes:
@@ -174,6 +227,8 @@ class KvmVm:
             if not os.path.isfile(real_install_iso_path):
                 raise ValueError(f"[{self.Keyword.InstallIsoPath}] does not exist [{real_install_iso_path}]")
             self.VmData[self.Keyword.InstallIsoPath] = real_install_iso_path
+        self.validate_usb_devices()
+        self.validate_block_devices()
         os_type = self.VmData.get(self.Keyword.OsType, None)
         if os_type is None:
             raise ValueError(f"Missing field[{self.Keyword.OsType}] in Vm Data")
@@ -182,6 +237,210 @@ class KvmVm:
         os_variant = self.VmData.get(self.Keyword.OsVariant, None)
         if os_variant is None:
             raise ValueError(f"Missing field[{self.Keyword.OsVariant}] in Vm Data")
+
+    _UsbIdPattern = re.compile(r"^[0-9a-f]{4}$")
+
+    @staticmethod
+    def usb_device_key(device: dict) -> str:
+        """Identity of a usbDevices entry: "<vendorId>:<productId>"."""
+        return f"{device[KvmVm.Keyword.VendorId]}:{device[KvmVm.Keyword.ProductId]}"
+
+    def _pass_warn(self, message: str):
+        """Log a passthrough warning and keep it for the API response (PassWarnings)."""
+        self.log.warning(message)
+        if not hasattr(self, "PassWarnings"):
+            self.PassWarnings = []
+        self.PassWarnings.append(message)
+
+    def validate_usb_devices(self):
+        """usbDevices: optional list of {vendorId, productId} (4 lowercase hex digits each).
+
+        A malformed entry (hand-edited JSON) is dropped with a warning instead of
+        failing: raising here would block stop/delete too. The usable entries go to
+        self.UsbCfg; self.VmData is left untouched, because it is written back to
+        the JSON (create_ci_user_data) and the entry must not silently vanish.
+        """
+        self.UsbCfg = []
+        usb_devices = self.VmData.get(self.Keyword.UsbDevices, None)
+        if usb_devices is None:
+            return
+        if not isinstance(usb_devices, list):
+            self._pass_warn(f"Ignore [{self.Keyword.UsbDevices}]: expect a list, got [{usb_devices}]")
+            return
+        seen = set()
+        for device in usb_devices:
+            problem = None
+            if not isinstance(device, dict):
+                problem = "expect an object"
+            else:
+                for key in (self.Keyword.VendorId, self.Keyword.ProductId):
+                    value = device.get(key, None)
+                    if not isinstance(value, str) or not self._UsbIdPattern.match(value):
+                        problem = f"[{key}] should be 4 lowercase hex digits"
+                        break
+            if problem is None and self.usb_device_key(device) in seen:
+                problem = "duplicate"
+            if problem is not None:
+                self._pass_warn(f"Ignore [{self.Keyword.UsbDevices}] entry [{device}]: {problem}")
+                continue
+            seen.add(self.usb_device_key(device))
+            self.UsbCfg.append(device)
+
+    BlockByIdDir = "/dev/disk/by-id/"
+
+    @staticmethod
+    def block_device_key(device: dict) -> str:
+        """Identity of a blockDevices entry: the /dev/disk/by-id link name."""
+        return os.path.basename(device[KvmVm.Keyword.Path])
+
+    @staticmethod
+    def valid_block_key(name) -> bool:
+        """A /dev/disk/by-id link name: no '/', no whitespace, not '.' or '..'.
+
+        No ',' either: the path goes into virt-install `--disk path=...,format=raw`,
+        which splits on commas, so a comma would add options.
+        """
+        return (isinstance(name, str) and name not in ("", ".", "..")
+                and "/" not in name and "," not in name and not any(c.isspace() for c in name))
+
+    @staticmethod
+    def valid_block_path(path) -> bool:
+        """A blockDevices path that may be recorded and used: /dev/disk/by-id/<name>
+        with a valid name that is not derived from disk contents (lvm-pv-uuid-...,
+        which the guest can make disappear by rewriting the disk)."""
+        if not isinstance(path, str) or not path.startswith(KvmVm.BlockByIdDir):
+            return False
+        name = path[len(KvmVm.BlockByIdDir):]
+        return KvmVm.valid_block_key(name) and not name.startswith(KvmDevice._ByIdContentPrefixes)
+
+    def validate_block_devices(self):
+        """blockDevices: optional list of {path} where path is a /dev/disk/by-id/ link.
+
+        by-id only: /dev/sdX names follow probe order and change across replug/reboot.
+        A missing or busy device is not an error here (see resolve_passthrough).
+        Malformed entries are dropped with a warning, like validate_usb_devices;
+        the usable ones go to self.BlockCfg.
+        """
+        self.BlockCfg = []
+        block_devices = self.VmData.get(self.Keyword.BlockDevices, None)
+        if block_devices is None:
+            return
+        if not isinstance(block_devices, list):
+            self._pass_warn(f"Ignore [{self.Keyword.BlockDevices}]: expect a list, got [{block_devices}]")
+            return
+        seen = set()
+        for device in block_devices:
+            problem = None
+            path = device.get(self.Keyword.Path, None) if isinstance(device, dict) else None
+            if not self.valid_block_path(path):
+                problem = f"[{self.Keyword.Path}] should be a {self.BlockByIdDir}<name> path"
+            elif self.block_device_key(device) in seen:
+                problem = "duplicate"
+            if problem is not None:
+                self._pass_warn(f"Ignore [{self.Keyword.BlockDevices}] entry [{device}]: {problem}")
+                continue
+            seen.add(self.block_device_key(device))
+            self.BlockCfg.append(device)
+
+    @staticmethod
+    def usb_hostdev_xml(device: dict) -> str:
+        """libvirt <hostdev> for USB passthrough, matched by vendor/product.
+
+        startupPolicy='optional': the VM still starts when the device is unplugged.
+        """
+        return (
+            "<hostdev mode='subsystem' type='usb' managed='yes'>"
+            "<source startupPolicy='optional'>"
+            f"<vendor id='0x{device[KvmVm.Keyword.VendorId]}'/>"
+            f"<product id='0x{device[KvmVm.Keyword.ProductId]}'/>"
+            "</source>"
+            "</hostdev>"
+        )
+
+    def resolve_passthrough(self):
+        """Decide which configured passthrough devices are safe to hand over now.
+
+        Attach-time checks (REST) are not enough: the host may have mounted a disk
+        since, another VM may have started with it, or a second device with the same
+        vendor:product may have been plugged in. A device that is not safe is
+        skipped with a warning and the VM starts without it, like a missing device.
+        Sets self.PassUsb / self.PassBlock.
+        """
+        self.PassUsb, self.PassBlock = [], []
+        if not hasattr(self, "UsbCfg"):
+            self.validate_usb_devices()
+        if not hasattr(self, "BlockCfg"):
+            self.validate_block_devices()
+        usb_cfg, block_cfg = self.UsbCfg, self.BlockCfg
+        if not usb_cfg and not block_cfg:
+            return
+        # Runs before this VM's domain exists, so "attached to VM" means another VM.
+        host = KvmDevice.discover(logger=self.log)
+        lsblk_error = host.get("errors", {}).get(KvmDevice.Keyword.Types.Block)
+        skip = "VM [" + self.VmName + "] starts without {what}: {why}"
+
+        for device in usb_cfg:
+            key = self.usb_device_key(device)
+            matches = [u for u in host[KvmDevice.Keyword.Types.USB]
+                       if f"{u['vendorId']}:{u['productId']}" == key]
+            if len(matches) > 1:
+                # libvirt refuses to pick one: virsh create would fail.
+                held = [f"{m['id']}" + (f" ({m['reason']})" if not m["attachable"] else " (free)") for m in matches]
+                self._pass_warn(skip.format(what=f"USB [{key}]", why=(
+                    f"{len(matches)} host devices share it, libvirt cannot tell them apart: "
+                    f"{', '.join(held)}")))
+            elif matches and not matches[0]["attachable"]:
+                self._pass_warn(skip.format(what=f"USB [{key}]", why=matches[0]["reason"]))
+            elif not matches and KvmDevice.raw_usb_ids(device[self.Keyword.VendorId], device[self.Keyword.ProductId]):
+                # Plugged in but hidden by discovery (a hub, or unreadable sysfs):
+                # passing a hub through would take every device behind it.
+                raw = KvmDevice.raw_usb_ids(device[self.Keyword.VendorId], device[self.Keyword.ProductId])
+                kind = "a USB hub" if any(is_hub for _, is_hub in raw) else "not an attachable USB device"
+                self._pass_warn(skip.format(what=f"USB [{key}]", why=f"{', '.join(n for n, _ in raw)} is {kind}"))
+            else:
+                # Not plugged in is fine: startupPolicy='optional'.
+                self.PassUsb.append(device)
+
+        for device in block_cfg:
+            path = device[self.Keyword.Path]
+            if not os.path.exists(path):
+                # libvirt has no startupPolicy for block disks.
+                self._pass_warn(skip.format(what=f"disk [{path}]", why="not present"))
+                continue
+            if lsblk_error is not None:
+                self._pass_warn(skip.format(what=f"disk [{path}]", why=f"cannot check host use: {lsblk_error}"))
+                continue
+            real = os.path.realpath(path)
+            matches = [b for b in host[KvmDevice.Keyword.Types.Block] if b["path"] == real]
+            if not matches:
+                self._pass_warn(skip.format(what=f"disk [{path}]", why=f"{real} is not a whole disk"))
+            elif not matches[0]["attachable"]:
+                self._pass_warn(skip.format(what=f"disk [{path}]", why=matches[0]["reason"]))
+            else:
+                self.PassBlock.append(device)
+
+    def add_usb_hostdevs(self, domain_xml: str) -> str:
+        """Append a <hostdev> per usable usbDevices entry to the virt-install generated XML.
+
+        Not passed to virt-install as --hostdev: virt-install looks the device up on
+        the host and fails when it is unplugged, which startupPolicy='optional' is
+        meant to tolerate.
+        """
+        if not hasattr(self, "PassUsb"):
+            self.resolve_passthrough()
+        if not self.PassUsb:
+            return domain_xml
+        try:
+            root = ET.fromstring(domain_xml)
+        except ET.ParseError as e:
+            raise ValueError(f"virt-install --print-xml output is not a single domain XML, "
+                             f"cannot add USB devices: {e}")
+        devices = root.find("devices")
+        if devices is None:
+            devices = ET.SubElement(root, "devices")
+        for device in self.PassUsb:
+            devices.append(ET.fromstring(self.usb_hostdev_xml(device)))
+        return ET.tostring(root, encoding="unicode")
 
     def parse_relative_path(self, file_path):
         vm_path = self.VmData[self.Keyword.VmPath]
@@ -211,13 +470,31 @@ class KvmVm:
         self.create_vm()
         self.sync_vm_state()
     
+    def domain_exists(self) -> bool:
+        return self.VmName in Util.run_command("virsh list --name --all").stdout_lines
+
     def delete_vm(self):
-        cmd_result = Util.run_command("virsh list --name --all")
-        if self.VmName not in cmd_result.stdout_lines:
+        if not self.domain_exists():
             self.log.info(f"VM[{self.VmName}] not in virsh list. Done")
             return
-        self.log.info(f"run virsh to destroy VM[{self.VmName}]")
-        Util.run_command(f"virsh destroy {self.VmName}")
+        if self.vm_running():
+            self.log.info(f"run virsh to destroy VM[{self.VmName}]")
+            Util.run_command(f"virsh destroy {self.VmName}")
+        # A transient domain is gone now; a persistent one (older version, or
+        # defined by hand) is still defined and must be undefined too.
+        if not self.domain_exists():
+            return
+        self.log.info(f"VM[{self.VmName}] has a persistent domain, undefine it")
+        errors = []
+        for cmd in (f"virsh undefine --nvram {self.VmName}", f"virsh undefine {self.VmName}"):
+            try:
+                Util.run_command(cmd)
+                return
+            except SystemError as e:
+                errors.append(str(e))
+                if not self.domain_exists():
+                    return
+        raise SystemError(f"Cannot undefine persistent domain of VM [{self.VmName}]: {'; '.join(errors)}")
 
     def create_ci_iso(self):
         if not self.VmData[self.Keyword.UseCloudInit]:
@@ -310,9 +587,9 @@ class KvmVm:
             user_data.extend(run_commands)
 
         Util.write_file(user_data_path, "w", user_data)
-        # Write VM data JSON back with login attribute.
-        with open(self.DataPath, "w") as f:
-            json.dump(self.VmData, f, indent=4)
+        # Write VM data JSON back with login attribute. Atomic: the REST
+        # device-claim scan reads other VMs' JSON without their lock.
+        Util.write_json_atomic(self.DataPath, self.VmData)
         return user_data_path
 
     def _apply_customer_pwd(self, user_data: list):
@@ -499,8 +776,26 @@ class KvmVm:
         self.log.info(f"Create VM [{self.VmName}]")
         cmd_result = Util.run_command(f"virsh list --name --all")
         if self.VmName in cmd_result.stdout_lines:
-            self.log.info(f"VM[{self.VmName}] already exists.")
-            return
+            if self.vm_running():
+                self.log.info(f"VM[{self.VmName}] already exists.")
+                return
+            # Managed VMs are transient, so a domain that exists but is shut off is
+            # persistent (older version, or defined by hand). `virsh start` on it
+            # would boot whatever devices its old XML holds and skip the passthrough
+            # checks below. Undefine it so the domain is rebuilt from the VM JSON.
+            self.log.info(f"VM[{self.VmName}] has a stopped persistent domain, undefine it "
+                          f"to rebuild from the VM JSON")
+            try:
+                Util.run_command(f"virsh undefine {self.VmName}")
+            except SystemError as e:
+                # A transient domain that exited between the two list calls (guest
+                # shut itself down) looks the same and is simply gone now.
+                if self.domain_exists():
+                    raise SystemError(
+                    f"VM [{self.VmName}] has a persistent domain that cannot be undefined; "
+                    f"refusing to start it unchecked (undefine it by hand, e.g. "
+                    f"`virsh undefine --nvram {self.VmName}`): {e}") from e
+                self.log.info(f"VM[{self.VmName}] domain went away meanwhile, build it")
         vm_path = self.VmData[self.Keyword.VmPath]
         self.log.info(f"make sure VM path exists.[{vm_path}]")
         Util.run_command(f"mkdir -p {vm_path}")
@@ -508,23 +803,51 @@ class KvmVm:
         self.log.info(f"Make sure all disk images created")
         for disk in self.Disks:
             disk.Create()
-        vm_create_cmd = self.create_vm_cmd()
+        starting = self.VmData[self.Keyword.VmState] == self.Keyword.VmStates.Running
+        if not starting:
+            # Still run virt-install --print-xml so a bad definition fails now, not on
+            # the first start. But no `virsh create`: it boots the domain right away,
+            # running the guest (with passthrough disks/USB) only for sync_vm_state to
+            # pull the power. Managed VMs are transient; the domain is built on start.
+            self._write_domain_xml(vm_path, passthrough=False)
+            self.log.info(f"VM [{self.VmName}] desired state is stopped: definition validated, "
+                          f"domain is created on start")
+            return
+        with host_start_lock():
+            vm_def_file = self._write_domain_xml(vm_path, passthrough=True)
+            self.log.info(f"Create vm [{self.VmName}] using definition XML. [{vm_def_file}]")
+            Util.run_command(f"virsh create {vm_def_file}")
+        self.log.info(f"VM [{self.VmName}] created.")
+
+    def _write_domain_xml(self, vm_path: str, passthrough: bool) -> str:
+        """Run virt-install --print-xml, write vm_def_create_<vm>.sh and vm_def_<vm>.xml.
+
+        passthrough=False leaves usbDevices/blockDevices out (no host checks):
+        used to validate the definition of a VM that is not being started.
+        """
+        vm_create_cmd = self.create_vm_cmd(passthrough=passthrough)
         vm_def_create_file = os.path.join(vm_path, f"vm_def_create_{self.VmName}.sh")
         self.log.info(f"Create bash file that can create vm definition XML file. {vm_def_create_file}")
         vm_create_cmd_str = " \\".join(vm_create_cmd)
+        if passthrough and self.PassUsb:
+            # USB hostdevs are spliced into the XML after virt-install
+            # (add_usb_hostdevs), so this script alone does not reproduce them.
+            vm_create_cmd_str = (
+                "# NOTE: USB devices are not in this command; they are added to the XML\n"
+                f"# afterwards (see vm_def_{self.VmName}.xml): "
+                + ", ".join(self.usb_device_key(d) for d in self.PassUsb) + "\n" + vm_create_cmd_str)
         Util.write_file(vm_def_create_file, "w", vm_create_cmd_str)
         self.log.info("vm def creation bash created.")
         vm_def_file = os.path.join(vm_path, f"vm_def_{self.VmName}.xml")
         self.log.info(f"Run def creation command to generate VM definition XML file. [{vm_def_file}]")
         cmd_result = Util.run_command(" ".join(vm_create_cmd))
+        domain_xml = self.add_usb_hostdevs(cmd_result.stdout) if passthrough else cmd_result.stdout
         with open(vm_def_file, "w") as fp:
-            fp.write(cmd_result.stdout)
+            fp.write(domain_xml)
         self.log.info(f"VM definition file created")
-        self.log.info(f"Create vm [{self.VmName}] using definition XML. [{vm_def_file}]")
-        Util.run_command(f"virsh create {vm_def_file}")
-        self.log.info(f"VM [{self.VmName}] created.")
+        return vm_def_file
 
-    def create_vm_cmd(self) -> list:
+    def create_vm_cmd(self, passthrough: bool = True) -> list:
         ram_in_mb= self.VmData[self.Keyword.RamInGb] * 1024
         vm_create_cmd = [
             f"virt-install --print-xml --name {self.VmName}"
@@ -535,10 +858,23 @@ class KvmVm:
         ]
         if KvmVm.Keyword.HostCPU in self.VmData and self.VmData[KvmVm.Keyword.HostCPU]:
             vm_create_cmd.append(f"  --cpu host")
+        if passthrough:
+            self.resolve_passthrough()
+        pass_block = self.PassBlock if passthrough else []
+        # With passthrough disks, "--boot hd" would also try them (a bootable one
+        # could win over a blank OS disk and skip the installer). Give the OS disks
+        # and the install ISO explicit per-device boot order instead; passthrough
+        # disks get none, so firmware never boots them. virt-install drops the
+        # legacy <boot dev> once a device has an order (libvirt forbids both).
+        boot_order = iter(range(1, 100)) if pass_block else None
         for disk in self.Disks:
-            vm_create_cmd.append(f"  --disk {disk.disk_cmd()}")
+            order = f",boot_order={next(boot_order)}" if boot_order else ""
+            vm_create_cmd.append(f"  --disk {disk.disk_cmd()}{order}")
         for net in self.Networks:
             vm_create_cmd.append(f"  --network {net.net_cmd()}")
+        for device in pass_block:
+            path = device[self.Keyword.Path]
+            vm_create_cmd.append(f"  --disk path={path},format=raw,bus=virtio,cache=none,io=native")
         if self.VmData[self.Keyword.UseCloudInit]:
             vm_create_cmd.append(f"  --disk path={self.VmData[self.Keyword.CIIsoPath]},device=cdrom")
         install_iso_path = self.VmData.get(self.Keyword.InstallIsoPath, None)
@@ -546,8 +882,11 @@ class KvmVm:
             # Boot the disk first: a blank disk is not bootable so the installer
             # runs from the ISO; once installed, reboots go straight to the disk
             # instead of looping back into the installer.
-            vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom")
-            vm_create_cmd.append(f"  --boot hd,cdrom")
+            if boot_order:
+                vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom,boot_order={next(boot_order)}")
+            else:
+                vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom")
+                vm_create_cmd.append(f"  --boot hd,cdrom")
         # VNC only on loopback: reach it through the REST web console
         # (GET /api/v1/vms/<name>/console) or an SSH tunnel.
         vm_create_cmd.append(f"  --graphics vnc,listen=127.0.0.1")
