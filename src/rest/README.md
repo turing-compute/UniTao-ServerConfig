@@ -578,7 +578,8 @@ GET /api/v1/vms/<name>/inventory/<file>
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/devices` | 列出 USB 设备和整块磁盘 |
+| GET | `/api/v1/devices` | 列出 USB 设备和整块磁盘（只含 id 和基本情况） |
+| GET | `/api/v1/devices?detail=true` | 列出全部字段（与单个设备接口相同，不含另一边的条目） |
 | GET | `/api/v1/devices?type=usb` | 只列 USB 设备（`type=block` 只列磁盘） |
 | GET | `/api/v1/devices?attachable=true` | 只列当前可挂载的设备 |
 | GET | `/api/v1/devices/<id>` | 查看单个设备（`id` 为 USB 的 sysfs 名如 `2-1`，或磁盘名如 `sdb`） |
@@ -606,8 +607,39 @@ USB 设备下的光驱等不在 `block` 列表中的设备（如 `sr0`）也会�
 
 主机和 VM 同时写同一块盘会损坏数据，所以挂载前先在主机上 `umount`。
 
+列表默认只返回 id 和基本情况，详细信息用 [`GET /api/v1/devices/<id>`](#单个设备) 查看：
+
 ```json
 GET /api/v1/devices
+{
+  "success": true,
+  "data": {
+    "usb": [
+      {
+        "id": "2-1",
+        "vendorId": "0bc2", "productId": "3343",
+        "manufacturer": "Seagate", "product": "Expansion HDD",
+        "blockDevices": ["sdb"],
+        "attachable": true, "reason": null
+      }
+    ],
+    "block": [
+      {
+        "id": "sdb",
+        "sizeBytes": 4000787030016,
+        "model": "Expansion HDD", "transport": "usb",
+        "usbDevice": "2-1",
+        "attachable": true, "reason": null
+      }
+    ]
+  }
+}
+```
+
+全部字段（`?detail=true`，或单个设备接口）：
+
+```json
+GET /api/v1/devices?detail=true
 {
   "success": true,
   "data": {
