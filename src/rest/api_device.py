@@ -143,3 +143,36 @@ def list_devices():
         "success": True,
         "data": devices
     })
+
+
+@device_bp.route("/<device_id>", methods=["GET"])
+def get_device(device_id: str):
+    """One host device by id: a USB sysfs name (e.g. "2-1") or a disk name (e.g. "sdb").
+
+    Same fields as the list, plus "type". A USB disk is one device seen twice, so
+    the other side comes along: a USB device gets "disks" (its block entries), a
+    disk on USB gets "usb" (its USB entry). Discovery errors are kept in "errors",
+    since they explain why the device is not attachable.
+    """
+    devices = discover_devices()
+    usb_list = devices.get(KvmDevice.Keyword.Types.USB, [])
+    block_list = devices.get(KvmDevice.Keyword.Types.Block, [])
+    usb = next((d for d in usb_list if d["id"] == device_id), None)
+    disk = next((d for d in block_list if d["id"] == device_id), None)
+    if usb is not None:
+        data = dict(usb, type=KvmDevice.Keyword.Types.USB)
+        data["disks"] = [d for d in block_list if d["id"] in usb.get("blockDevices", [])]
+    elif disk is not None:
+        data = dict(disk, type=KvmDevice.Keyword.Types.Block)
+        data["usb"] = next((u for u in usb_list if u["id"] == disk.get("usbDevice")), None)
+    else:
+        message = f"Device '{device_id}' not found on host"
+        if devices.get("errors", {}).get(KvmDevice.Keyword.Types.Block):
+            message += f" (disk list unavailable: {devices['errors'][KvmDevice.Keyword.Types.Block]})"
+        return jsonify({
+            "success": False,
+            "error": {"code": "DEVICE_NOT_FOUND", "message": message}
+        }), 404
+    if devices.get("errors"):
+        data["errors"] = devices["errors"]
+    return jsonify({"success": True, "data": data})
