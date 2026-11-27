@@ -6,14 +6,15 @@
 #   DELETE /api/v1/vms/<name>/usb/<vendorId>:<productId>  detach it
 #
 # The VM JSON `usbDevices` list is the source of truth: managed VMs are transient
-# domains rebuilt from the JSON on every start (KvmVm.add_usb_hostdevs). A running
-# VM is additionally hot-plugged / unplugged with `virsh attach|detach-device --live`.
+# domains rebuilt from the JSON on every start (KvmVm.add_usb_hostdevs).
+#
+# No hot-plug: attach/detach require the VM to be stopped and take effect on the
+# next start. Pulling a disk out of a running guest that still has it mounted loses
+# data, so the guest has to be shut down first.
 #########################################################################################
 
 import logging
-import os
 import re
-import tempfile
 
 from extlib.flask import Blueprint, request, jsonify, current_app
 
@@ -46,24 +47,17 @@ def _norm_id(value):
     return value.lower().zfill(4)
 
 
-def _virsh_device(action: str, vm_name: str, device: dict):
-    """Hot-plug (attach) or unplug (detach) one USB device on a running VM."""
-    xml = KvmVm.usb_hostdev_xml(device, optional=False)
-    fd, path = tempfile.mkstemp(prefix=f"usb-{vm_name}-", suffix=".xml")
-    try:
-        with os.fdopen(fd, "w") as fp:
-            fp.write(xml)
-        Util.run_command(f"virsh {action}-device {vm_name} {path} --live")
-    finally:
-        os.remove(path)
-
-
-def _live_attached(vm_name: str, key: str) -> bool:
-    """Whether the VM's live domain has a USB hostdev for <vendorId>:<productId>."""
-    for item in KvmDevice.attached_devices(_get_logger())["usb"]:
-        if item["vm"] == vm_name and f"{item['vendorId']}:{item['productId']}" == key:
-            return True
-    return False
+def _require_stopped(name: str, vm_data: dict):
+    """(error response or None, live virsh state). Same rule as eject-iso."""
+    if vm_data.get("vmState") != KvmVm.Keyword.VmStates.Stopped:
+        return _patch_error(
+            "VM_RUNNING",
+            f"VM '{name}' must be stopped before changing USB devices "
+            f"(vmState='{vm_data.get('vmState')}'); hot-plug is not supported", 409), None
+    live_state = _get_virsh_state(name)
+    if live_state == KvmVm.Keyword.VmStates.Running:
+        return _patch_error("VM_RUNNING", f"VM '{name}' is still running in virsh", 409), None
+    return None, live_state
 
 
 def _undefine_if_persistent(vm_name: str, live_state: str, warnings: list):
@@ -108,7 +102,7 @@ def list_vm_usb(name: str):
 
 @vm_usb_bp.route("/<name>/usb", methods=["POST"])
 def attach_vm_usb(name: str):
-    """Attach a host USB device to a VM.
+    """Attach a host USB device to a stopped VM; it is passed through from the next start.
 
     Body: {"device": "<id from GET /api/v1/devices?type=usb>"}
        or {"vendorId": "0bc2", "productId": "3343"}
@@ -131,6 +125,9 @@ def attach_vm_usb(name: str):
         vm_data = read_entity_data(current_app, "vm", name)
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+        error, live_state = _require_stopped(name, vm_data)
+        if error is not None:
+            return error
 
         usb_devices = discover_devices(KvmDevice.Keyword.Types.USB)[KvmDevice.Keyword.Types.USB]
         if device_id is not None:
@@ -159,9 +156,10 @@ def attach_vm_usb(name: str):
                 "passthrough by vendor:product cannot tell them apart", 409)
         host_device = matches[0]
 
-        # Already attached to this very VM by hand: just record it.
-        live_here = host_device.get("attachedTo") == name
-        if not host_device["attachable"] and not live_here:
+        # A stopped persistent domain of this VM may already hold it (attached by
+        # hand): just record it, the domain is undefined below anyway.
+        held_here = host_device.get("attachedTo") == name
+        if not host_device["attachable"] and not held_here:
             return _patch_error(
                 "DEVICE_UNAVAILABLE",
                 f"USB device '{host_device['id']}' ({key}) cannot be attached: {host_device['reason']}", 409)
@@ -171,37 +169,22 @@ def attach_vm_usb(name: str):
         if description:
             entry["description"] = description
 
-        live_state = _get_virsh_state(name)
-        hotplugged = False
-        if live_state == KvmVm.Keyword.VmStates.Running and not live_here:
-            logger.info("Hot-plug USB [%s] into running VM [%s]", key, name)
-            _virsh_device("attach", name, entry)
-            hotplugged = True
-
         vm_data[KvmVm.Keyword.UsbDevices] = configured + [entry]
-        try:
-            _atomic_write_json(vm_json_path(current_app, name), vm_data)
-        except Exception:
-            if hotplugged:
-                try:
-                    _virsh_device("detach", name, entry)
-                except SystemError as e:
-                    logger.error("Rollback detach of USB [%s] from VM [%s] failed: %s", key, name, e)
-            raise
+        _atomic_write_json(vm_json_path(current_app, name), vm_data)
 
         warnings = []
         _undefine_if_persistent(name, live_state, warnings)
-        logger.info("Attached USB [%s] (%s) to VM [%s], hotplugged=%s", key, host_device["id"], name, hotplugged)
+        logger.info("Attached USB [%s] (%s) to VM [%s]", key, host_device["id"], name)
         return jsonify({
             "success": True,
             "data": {"name": name, "key": key, "attached": True, "device": entry,
-                     "hostDevice": host_device["id"], "hotplugged": hotplugged,
-                     "warnings": warnings}
+                     "hostDevice": host_device["id"], "warnings": warnings}
         }), 201
 
 
 @vm_usb_bp.route("/<name>/usb/<key>", methods=["DELETE"])
 def detach_vm_usb(name: str, key: str):
+    """Remove a USB device from a stopped VM; the next start no longer passes it through."""
     logger = _get_logger()
     m = _KEY_PATTERN.match(key)
     if not m:
@@ -212,19 +195,14 @@ def detach_vm_usb(name: str, key: str):
         vm_data = read_entity_data(current_app, "vm", name)
         if vm_data is None:
             return _patch_error("NOT_FOUND", f"VM '{name}' not found", 404)
+        error, live_state = _require_stopped(name, vm_data)
+        if error is not None:
+            return error
 
         configured = vm_data.get(KvmVm.Keyword.UsbDevices, None) or []
         remaining = [d for d in configured if KvmVm.usb_device_key(d) != key]
         if len(remaining) == len(configured):
             return _patch_error("NOT_FOUND", f"USB device '{key}' is not configured on VM '{name}'", 404)
-        entry = next(d for d in configured if KvmVm.usb_device_key(d) == key)
-
-        live_state = _get_virsh_state(name)
-        unplugged = False
-        if live_state == KvmVm.Keyword.VmStates.Running and _live_attached(name, key):
-            logger.info("Unplug USB [%s] from running VM [%s]", key, name)
-            _virsh_device("detach", name, entry)
-            unplugged = True
 
         if remaining:
             vm_data[KvmVm.Keyword.UsbDevices] = remaining
@@ -234,9 +212,8 @@ def detach_vm_usb(name: str, key: str):
 
         warnings = []
         _undefine_if_persistent(name, live_state, warnings)
-        logger.info("Detached USB [%s] from VM [%s], unplugged=%s", key, name, unplugged)
+        logger.info("Detached USB [%s] from VM [%s]", key, name)
         return jsonify({
             "success": True,
-            "data": {"name": name, "key": key, "detached": True, "unplugged": unplugged,
-                     "warnings": warnings}
+            "data": {"name": name, "key": key, "detached": True, "warnings": warnings}
         })

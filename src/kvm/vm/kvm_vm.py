@@ -222,16 +222,14 @@ class KvmVm:
             seen.add(dev_key)
 
     @staticmethod
-    def usb_hostdev_xml(device: dict, optional: bool = True) -> str:
+    def usb_hostdev_xml(device: dict) -> str:
         """libvirt <hostdev> for USB passthrough, matched by vendor/product.
 
-        optional → startupPolicy='optional': the VM still starts when the device is
-        unplugged. Only meaningful in the domain definition, not for hot-plug.
+        startupPolicy='optional': the VM still starts when the device is unplugged.
         """
-        source = "<source startupPolicy='optional'>" if optional else "<source>"
         return (
             "<hostdev mode='subsystem' type='usb' managed='yes'>"
-            f"{source}"
+            "<source startupPolicy='optional'>"
             f"<vendor id='0x{device[KvmVm.Keyword.VendorId]}'/>"
             f"<product id='0x{device[KvmVm.Keyword.ProductId]}'/>"
             "</source>"
