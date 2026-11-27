@@ -50,7 +50,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 
 ### 共享库 (`src/shared/`)
 
-- **`utilities.py`** — `Util` 类，包含静态方法：`read_json_file()`（读取 JSON 文件）、`run_command()`（subprocess 封装，非零退出时抛出 `SystemError`）、`abs_path()`、`file_data_name()`（从文件路径提取实体名称）、`write_file()`、`compare_dict()`、`is_int_str()`、`parse_mac_address()`。
+- **`utilities.py`** — `Util` 类，包含静态方法：`read_json_file()`（读取 JSON 文件）、`run_command()`（subprocess 封装，非零退出时抛出 `SystemError`）、`abs_path()`、`file_data_name()`（从文件路径提取实体名称）、`write_file()`、`write_text_atomic()`/`write_json_atomic()`（临时文件 + rename 原子替换，保留原文件权限，跟随符号链接）、`compare_dict()`、`is_int_str()`、`parse_mac_address()`。
 - **`logger.py`** — `Log.get_logger(name, log_file, level)` 返回配置好的 `logging.Logger`，支持控制台输出和可选的日志文件输出。重新调用时会清除重复的 handler。
 
 ### KVM 虚拟机管理 (`src/kvm/vm/kvm_vm.py`)
@@ -60,7 +60,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 - **`KvmVm`** — 虚拟机生命周期管理器。负责：
   1. 验证虚拟机 JSON 定义（vCPU、RAM、磁盘、网络、操作系统类型/变体、期望状态、Cloud-Init 设置）。
   2. 解析相对路径 — 支持 `{vmPath}` 占位符，在验证时替换为实际的虚拟机目录路径。
-  3. `create_vm()`：准备 cloud-init ISO 和磁盘镜像；仅当 `vmState` 为 `running` 时才生成 `virt-install --print-xml` 命令、写入 XML 定义文件并调用 `virsh create`（它会立即开机，期望 `stopped` 时不建 domain，避免开机一瞬间再被 destroy）。
+  3. `create_vm()`：准备 cloud-init ISO 和磁盘镜像，运行 `virt-install --print-xml` 写入 XML 定义文件（校验定义）；仅当 `vmState` 为 `running` 时才带上直通设备并调用 `virsh create`（它会立即开机，期望 `stopped` 时不建 domain，避免开机一瞬间再被 destroy）。直通检查到 `virsh create` 在模块级 `_start_lock` 内串行执行。
   4. `sync_vm_state()`：通过 `virsh destroy` / `virsh start` 调和虚拟机的运行/停止状态。
   5. `delete_vm()`：如果虚拟机存在则调用 `virsh destroy` 销毁。
   6. Cloud-Init 支持：生成 `user-data`、`meta-data` 和 `network-config` YAML 文件，通过 `genisoimage` 打包成 `cidata` ISO 文件，并作为 cdrom 挂载。同时将虚拟机 JSON 和网络 JSON 包含在 ISO 中以便自文档化。
@@ -69,7 +69,7 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
   9. `usbDevices` 关键字：`[{"vendorId", "productId"}]`（4 位小写十六进制），USB 直通。不经 virt-install `--hostdev`（设备拔掉时 virt-install 会失败），而是由 `add_usb_hostdevs()` 在 `--print-xml` 输出中追加 `<hostdev type='usb'>`，`startupPolicy='optional'` 使设备不在时 VM 仍可启动。REST 层见 `src/rest/api_vm_device.py`（`GET/POST /vms/<name>/usb`、`DELETE /vms/<name>/usb/<vid>:<pid>`）。**不支持热插拔**：POST/DELETE 要求 VM 已停止，下次启动生效。
   10. `blockDevices` 关键字：`[{"path"}]`，整块磁盘直通，`path` 必须是 `/dev/disk/by-id/<name>`（`/dev/sdX` 不稳定）。`create_vm_cmd()` 生成 `--disk path=...,format=raw,bus=virtio,cache=none,io=native`。
      `validate_usb_devices()`/`validate_block_devices()` 不抛异常：格式错误的条目记 WARNING 后忽略，可用条目放在 `self.UsbCfg`/`self.BlockCfg`（不改 `VmData`，因为它会被写回 JSON），以免一个坏条目阻止 stop/delete。
-     启动时 `resolve_passthrough()` 用 `KvmDevice.discover()` 重新检查 `usbDevices`/`blockDevices`：不在（块设备）、主机上有挂载点/LVM 等、被其他 domain 占用、USB `vendor:product` 重复时跳过并记 WARNING，VM 照常启动（libvirt 的块设备不支持 `startupPolicy`，重复的 USB 会让 `virsh create` 失败）。挂载接口另有跨 VM 的 `_claim_lock`，防止两个 VM 同时认领同一设备；`rest/service.py` 的 `write_entity_data()` 是原子写入，占用扫描读不到写了一半的 VM JSON，读不出的 VM JSON 视为占用未知（所有设备不可挂）。REST 层同在 `api_vm_device.py`（`GET/POST /vms/<name>/block`、`DELETE /vms/<name>/block/<by-id 名>`），同样要求 VM 已停止。
+     启动时 `resolve_passthrough()` 用 `KvmDevice.discover()` 重新检查 `usbDevices`/`blockDevices`：不在（块设备）、主机上有挂载点/LVM 等、被其他 domain 占用（含其分区被占用）、USB `vendor:product` 重复时跳过并记 WARNING（同时收集到 `PassWarnings`，由 `POST /start` 返回），VM 照常启动（libvirt 的块设备不支持 `startupPolicy`，重复的 USB 会让 `virsh create` 失败）。挂载接口另有跨 VM 的 `_claim_lock`，防止两个 VM 同时认领同一设备；VM JSON 的所有写入（`write_entity_data()`、`POST /vms`、`KvmVm` 写回）都用 `Util.write_json_atomic()`，占用扫描读不到写了一半的 VM JSON，读不出的 VM JSON 视为占用未知（所有设备不可挂）。REST 层同在 `api_vm_device.py`（`GET/POST /vms/<name>/block`、`DELETE /vms/<name>/block/<by-id 名>`），同样要求 VM 已停止。
   11. VNC 只监听 `127.0.0.1`（`--graphics vnc,listen=127.0.0.1`）。网页控制台见 `src/rest/api_console.py`：`GET /api/v1/vms/<name>/console` 提供 noVNC 页面，页面 `POST` 同一路径时启动一次性 `websockify --run-once`（连接断开即退出），VM stop/delete 时清理。
 
 - **`KvmNetwork`** — 虚拟机网络接口配置。支持两种接口类型：

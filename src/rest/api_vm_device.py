@@ -66,6 +66,22 @@ def _usb_key(device):
         return None
 
 
+def _usb_loose_key(device):
+    """usbDevices entry key normalized ('0BC2'/'bc2' → '0bc2'), or None.
+
+    For GET/DELETE, so a hand-edited entry can still be seen and removed by the
+    key GET shows. Attach compares strict keys: a non-canonical entry is ignored
+    at start, so it must not count as "already configured".
+    """
+    if not isinstance(device, dict):
+        return None
+    vendor = _norm_id(device.get(KvmVm.Keyword.VendorId))
+    product = _norm_id(device.get(KvmVm.Keyword.ProductId))
+    if vendor is None or product is None:
+        return None
+    return f"{vendor}:{product}"
+
+
 def _block_key(device):
     """blockDevices entry key, or None for a malformed (hand-edited) entry."""
     path = device.get(KvmVm.Keyword.Path) if isinstance(device, dict) else None
@@ -164,10 +180,12 @@ def list_vm_usb(name: str):
         devices.append({"entry": vm_data[KvmVm.Keyword.UsbDevices], "key": None,
                         "error": "usbDevices is not a list, fix the VM JSON"})
     for device in device_entries(vm_data, KvmVm.Keyword.UsbDevices):
-        key = _usb_key(device)
+        key = _usb_loose_key(device)
         if key is None:
             devices.append({"entry": device, "key": None, "error": "malformed entry, fix the VM JSON"})
             continue
+        problem = None if _usb_key(device) == key else \
+            "ids are not 4 lowercase hex digits: ignored at start, fix the VM JSON or DELETE it"
         host_ids = [u["id"] for u in host_usb if f"{u['vendorId']}:{u['productId']}" == key]
         entry = dict(device)
         entry.update({
@@ -176,6 +194,8 @@ def list_vm_usb(name: str):
             "hostDevices": host_ids,
             "liveAttached": key in live_keys,
         })
+        if problem:
+            entry["error"] = problem
         devices.append(entry)
 
     return jsonify({
@@ -294,7 +314,7 @@ def detach_vm_usb(name: str, key: str):
             return error
 
         configured = device_entries(vm_data, KvmVm.Keyword.UsbDevices)
-        remaining = [d for d in configured if _usb_key(d) != key]
+        remaining = [d for d in configured if _usb_loose_key(d) != key]
         if len(remaining) == len(configured):
             return _patch_error("NOT_FOUND", f"USB device '{key}' is not configured on VM '{name}'", 404)
 

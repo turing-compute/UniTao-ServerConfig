@@ -388,9 +388,9 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 
 ### 启动时检查
 
-挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。来宾里看不到某个直通设备时，先查 REST 日志。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
+挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。跳过的原因（以及被忽略的格式错误条目）同时出现在 `POST /api/v1/vms/<name>/start` 返回的 `data.warnings` 中。另一个 domain 直通了某块盘的分区时，整块盘也视为被占用。多个 VM 同时启动时，从检查到 `virsh create` 是串行的，不会两个 VM 都拿到同一个设备。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
 
-只有 `start` 才会生成 domain：期望状态为 `stopped` 时（`POST /vms` 新建、对已停止的 VM 调 `stop`、PATCH 调和等），只准备 cloud-init ISO 和磁盘镜像，不执行 `virsh create`。以前这些操作会让 VM 开机一瞬间再断电，直通设备会被来宾短暂占用，可能损坏数据。因此 virt-install 参数错误现在在 `start` 时才暴露，而不是 `POST /vms` 时。
+只有 `start` 才会生成 domain：期望状态为 `stopped` 时（`POST /vms` 新建、对已停止的 VM 调 `stop`、PATCH 调和等），准备 cloud-init ISO 和磁盘镜像，并运行 `virt-install --print-xml` 校验定义、写出 `vm_def_<vm>.xml`（不含直通设备），但不执行 `virsh create`。以前这些操作会让 VM 开机一瞬间再断电，直通设备会被来宾短暂占用，可能损坏数据。定义错误仍在 `POST /vms` 时暴露。
 
 另外：
 
@@ -398,7 +398,7 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 - virsh 状态查询失败时，挂载/卸下返回 500 `SYSTEM_COMMAND_FAILED`，不在不确定 VM 是否运行时修改配置。
 - 同一 VM 已以另一种方式配置了这块 USB 硬盘时返回 409，提示先从 `/usb` 或 `/block` 中 DELETE。
 - VM JSON 中格式不对的条目（手工编辑造成：大写十六进制、`/dev/sdX` 路径、重复等）不会阻止 `start`/`stop`/`delete`：启动时跳过并记 WARNING（`Ignore [usbDevices] entry ...`），JSON 原样保留。`GET /vms/<name>/usb|block` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON。`usbDevices`/`blockDevices` 整个不是列表时，该 VM 的挂载/卸下返回 409 `INVALID_VM_DATA`，其他 VM 和 `GET /api/v1/devices` 不受影响。
-- 某个 VM 的 JSON 读不出来时，它占用了哪些设备无从得知：`GET /api/v1/devices` 多出 `errors.claims`，所有设备都标为不可挂，挂载接口一律拒绝。VM JSON 的写入是原子的（临时文件 + rename），正常读写不会读到写了一半的文件。
+- 某个 VM 的 JSON 读不出来时，它占用了哪些设备无从得知：`GET /api/v1/devices` 多出 `errors.claims`，所有设备都标为不可挂，挂载接口一律拒绝。VM JSON 的写入（REST 和 `KvmVm` 写回 cloud-init 登录信息）都是原子的（临时文件 + rename，保留原文件权限），正常读写不会读到写了一半的文件；扫描期间被删除的 VM 视为没有占用。
 - `lsblk` 不可用时，`POST /vms/<name>/block` 返回 500 `SYSTEM_COMMAND_FAILED`。
 
 ### VM 认证方式

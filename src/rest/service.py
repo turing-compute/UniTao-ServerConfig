@@ -1,6 +1,5 @@
 import json
 import os
-import tempfile
 
 from shared.utilities import Util
 
@@ -111,17 +110,8 @@ def write_entity_data(app, data_type: str, name: str, data: dict):
     VMs' JSON without their per-VM lock and must never see a half-written file.
     """
     path = get_entity_path(app, data_type, name)
-    directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=f".{name}-", suffix=".json.tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=4)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Util.write_json_atomic(path, data)
 
 
 def delete_entity(app, data_type: str, name: str) -> bool:

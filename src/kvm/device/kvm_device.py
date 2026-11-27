@@ -35,6 +35,7 @@ class KvmDevice:
 
     SysUsbDir = "/sys/bus/usb/devices"
     SysBlockDir = "/sys/block"
+    SysClassBlockDir = "/sys/class/block"
     DevDir = "/dev"
     DiskByIdDir = "/dev/disk/by-id"
 
@@ -243,8 +244,21 @@ class KvmDevice:
                 source = disk.find("source")
                 if source is None or not source.get("dev"):
                     continue
-                attached["block"][os.path.realpath(source.get("dev"))] = vm
+                real = os.path.realpath(source.get("dev"))
+                attached["block"][real] = vm
+                # A partition passed through takes its whole disk too.
+                parent = KvmDevice._partition_parent(os.path.basename(real))
+                if parent is not None:
+                    attached["block"].setdefault(os.path.join(KvmDevice.DevDir, parent), vm)
         return attached
+
+    @staticmethod
+    def _partition_parent(name: str):
+        """Kernel name of the disk holding partition `name` (sdb1 → sdb), else None."""
+        entry = os.path.join(KvmDevice.SysClassBlockDir, name)
+        if not os.path.exists(os.path.join(entry, "partition")):
+            return None
+        return os.path.basename(os.path.dirname(os.path.realpath(entry)))
 
     # ───────────────────────────── state resolution ─────────────────────────────
 
@@ -495,10 +509,14 @@ class KvmDevice:
 
     @staticmethod
     def _to_int(value):
+        """Decimal ('005' → 5) or 0x-prefixed hex string, or a number; else None."""
         if value is None:
             return None
         try:
-            return int(value, 0) if isinstance(value, str) else int(value)
+            if isinstance(value, str):
+                value = value.strip()
+                return int(value, 16) if value.lower().startswith("0x") else int(value, 10)
+            return int(value)
         except (TypeError, ValueError):
             return None
 

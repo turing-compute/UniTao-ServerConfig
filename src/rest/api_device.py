@@ -37,6 +37,8 @@ def managed_claims(app) -> dict:
     for vm_name in list_entities(app, "vm"):
         try:
             vm_data = read_entity_data(app, "vm", vm_name) or {}
+        except FileNotFoundError:
+            continue  # deleted while scanning: claims nothing any more
         except Exception:
             claims["unreadable"].append(vm_name)
             continue
