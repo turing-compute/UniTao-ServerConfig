@@ -336,8 +336,10 @@ class KvmVm:
                        if f"{u['vendorId']}:{u['productId']}" == key]
             if len(matches) > 1:
                 # libvirt refuses to pick one: virsh create would fail.
+                held = [f"{m['id']}" + (f" ({m['reason']})" if not m["attachable"] else " (free)") for m in matches]
                 self._pass_warn(skip.format(what=f"USB [{key}]", why=(
-                    f"{len(matches)} host devices share it ({', '.join(m['id'] for m in matches)})")))
+                    f"{len(matches)} host devices share it, libvirt cannot tell them apart: "
+                    f"{', '.join(held)}")))
             elif matches and not matches[0]["attachable"]:
                 self._pass_warn(skip.format(what=f"USB [{key}]", why=matches[0]["reason"]))
             elif not matches and KvmDevice.raw_usb_ids(device[self.Keyword.VendorId], device[self.Keyword.ProductId]):
@@ -707,8 +709,22 @@ class KvmVm:
         self.log.info(f"Create VM [{self.VmName}]")
         cmd_result = Util.run_command(f"virsh list --name --all")
         if self.VmName in cmd_result.stdout_lines:
-            self.log.info(f"VM[{self.VmName}] already exists.")
-            return
+            if self.vm_running():
+                self.log.info(f"VM[{self.VmName}] already exists.")
+                return
+            # Managed VMs are transient, so a domain that exists but is shut off is
+            # persistent (older version, or defined by hand). `virsh start` on it
+            # would boot whatever devices its old XML holds and skip the passthrough
+            # checks below. Undefine it so the domain is rebuilt from the VM JSON.
+            self.log.info(f"VM[{self.VmName}] has a stopped persistent domain, undefine it "
+                          f"to rebuild from the VM JSON")
+            try:
+                Util.run_command(f"virsh undefine {self.VmName}")
+            except SystemError as e:
+                raise SystemError(
+                    f"VM [{self.VmName}] has a persistent domain that cannot be undefined; "
+                    f"refusing to start it unchecked (undefine it by hand, e.g. "
+                    f"`virsh undefine --nvram {self.VmName}`): {e}") from e
         vm_path = self.VmData[self.Keyword.VmPath]
         self.log.info(f"make sure VM path exists.[{vm_path}]")
         Util.run_command(f"mkdir -p {vm_path}")

@@ -68,7 +68,10 @@ class KvmDevice:
     # Disks that are never real hardware a VM should get.
     _SkipBlockPrefixes = ("loop", "zram", "ram", "nbd", "sr", "fd", "dm-", "md")
     # by-id link prefixes in order of preference (stable, human-readable first).
-    _ByIdPreference = ("usb-", "ata-", "nvme-", "scsi-")
+    _ByIdPreference = ("usb-", "ata-", "nvme-", "scsi-", "wwn-", "mmc-", "virtio-")
+    # by-id links made from disk contents (LVM, md, dm): the guest can rewrite
+    # them, so they are never recorded as a passthrough path.
+    _ByIdContentPrefixes = ("lvm-pv-uuid-", "md-uuid-", "md-name-", "dm-uuid-", "dm-name-")
     # lsblk child types that mean the host is using the disk.
     # A signature alone (fstype LVM2_member, crypto_LUKS, ...) is NOT host use: the
     # guest may have written it on its own passthrough disk. Host use is what is
@@ -243,8 +246,11 @@ class KvmDevice:
         missing from them must not be taken as free.
         """
         attached = {"usb": [], "block": {}}
+        # By UUID: Util.run_command splits on whitespace, so a domain name with a
+        # space ("win 10") cannot be passed to virsh. The name comes from the XML.
+        list_cmd = "virsh list --all --uuid"
         try:
-            domains = [d for d in Util.run_command("virsh list --all --name").stdout_lines if d.strip()]
+            uuids = [d.strip() for d in Util.run_command(list_cmd).stdout_lines if d.strip()]
         except FileNotFoundError:
             return attached  # no virsh binary: no libvirt, so no domain holds anything
         except Exception as e:
@@ -252,15 +258,24 @@ class KvmDevice:
                 logger.warning(f"Cannot list libvirt domains, attachment state unknown: {e}")
             attached["error"] = f"virsh list failed: {e}"
             return attached
-        for vm in domains:
+        for uuid in uuids:
             try:
-                xml_text = "\n".join(Util.run_command(f"virsh dumpxml {vm}").stdout_lines)
+                xml_text = "\n".join(Util.run_command(f"virsh dumpxml {uuid}").stdout_lines)
                 root = ET.fromstring(xml_text)
             except Exception as e:
+                # A transient domain stopped or deleted since `virsh list` is simply
+                # gone: it holds nothing. Only a domain that still exists is unknown.
+                try:
+                    still = uuid in [d.strip() for d in Util.run_command(list_cmd).stdout_lines]
+                except Exception:
+                    still = True
+                if not still:
+                    continue
                 if logger:
-                    logger.warning(f"Cannot read definition of VM [{vm}]: {e}")
-                attached["error"] = f"virsh dumpxml {vm} failed: {e}"
+                    logger.warning(f"Cannot read definition of domain [{uuid}]: {e}")
+                attached["error"] = f"virsh dumpxml {uuid} failed: {e}"
                 continue
+            vm = root.findtext("name") or uuid
             for hostdev in root.findall("./devices/hostdev[@type='usb']"):
                 source = hostdev.find("source")
                 if source is None:
@@ -548,13 +563,14 @@ class KvmDevice:
 
     @staticmethod
     def _pick_by_id(links: list):
+        links = sorted(l for l in (links or []) if not l.startswith(KvmDevice._ByIdContentPrefixes))
         if not links:
             return None
         for prefix in KvmDevice._ByIdPreference:
-            for link in sorted(links):
+            for link in links:
                 if link.startswith(prefix):
                     return os.path.join(KvmDevice.DiskByIdDir, link)
-        return os.path.join(KvmDevice.DiskByIdDir, sorted(links)[0])
+        return os.path.join(KvmDevice.DiskByIdDir, links[0])
 
     @staticmethod
     def _norm_hex(value):

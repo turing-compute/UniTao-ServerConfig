@@ -116,6 +116,9 @@ def _unavailable_reason(name: str, device: dict, found: dict):
     errors = found.get("errors", {})
     if errors.get("claims"):
         return errors["claims"]
+    if errors.get("attached"):
+        # Another domain may hold it too; discover() left this reason as is.
+        return f"cannot check VM attachments: {errors['attached']}"
     is_disk = "path" in device
     if errors.get(KvmDevice.Keyword.Types.Block) and (is_disk or device.get("blockDevices")):
         return f"cannot check host use: {errors[KvmDevice.Keyword.Types.Block]}"
@@ -167,7 +170,7 @@ def _require_stopped(name: str, vm_data: dict):
 
 def _undefine_if_persistent(vm_name: str, live_state: str):
     """A stopped persistent domain would be reused on start without the change
-    (create_vm skips an existing domain, and its passthrough checks with it).
+    (create_vm would refuse to start if the undefine failed there instead).
     Undefine it first, so the next start rebuilds the domain from the VM JSON.
 
     Returns an error response when undefine fails; the caller must then leave

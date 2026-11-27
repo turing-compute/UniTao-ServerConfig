@@ -390,7 +390,7 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 
 挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。跳过的原因（以及被忽略的格式错误条目）同时出现在 `POST /api/v1/vms/<name>/start` 返回的 `data.warnings` 中。另一个 domain 直通了某块盘的分区时，整块盘也视为被占用。多个 VM 同时启动时，从检查到 `virsh create` 是串行的，不会两个 VM 都拿到同一个设备。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
 
-挂载/卸下时如果 VM 还有遗留的已停止 persistent domain，会先 `virsh undefine` 再改 VM JSON；undefine 失败（如带 UEFI nvram）时返回 500 并且不改 JSON，需先手工 `virsh undefine --nvram <vm>`。否则下次 `start` 会直接启动旧 domain，改动不生效。手工配置的 USB hub 不会被直通（启动时跳过并给出警告），因为那会把 hub 后面的所有设备都从主机拿走。VM JSON 由原子写入替换，需要目录的写权限；以 root 运行时保留原文件的所有者。
+挂载/卸下时如果 VM 还有遗留的已停止 persistent domain，会先 `virsh undefine` 再改 VM JSON；undefine 失败（如带 UEFI nvram）时返回 500 并且不改 JSON，需先手工 `virsh undefine --nvram <vm>`。`start`（以及服务启动时的自动恢复、命令行）遇到已停止的 persistent domain 时同样先 undefine，再按 VM JSON 重建 domain，确保启动时检查一定执行；undefine 失败则拒绝启动，不会直接启动旧 domain。手工配置的 USB hub 不会被直通（启动时跳过并给出警告），因为那会把 hub 后面的所有设备都从主机拿走。VM JSON 由原子写入替换，需要目录的写权限；以 root 运行时保留原文件的所有者。
 
 只有 `start` 才会生成 domain：期望状态为 `stopped` 时（`POST /vms` 新建、对已停止的 VM 调 `stop`、PATCH 调和等），准备 cloud-init ISO 和磁盘镜像，并运行 `virt-install --print-xml` 校验定义、写出 `vm_def_<vm>.xml`（不含直通设备），但不执行 `virsh create`。以前这些操作会让 VM 开机一瞬间再断电，直通设备会被来宾短暂占用，可能损坏数据。定义错误仍在 `POST /vms` 时暴露。
 
@@ -585,7 +585,7 @@ GET /api/v1/vms/<name>/inventory/<file>
 两类设备对应两种挂法：
 
 - **`usb`**：USB 直通（`<hostdev type='usb'>`，按 `vendorId:productId` 匹配），来宾看到的是真实 USB 设备。来自 `/sys/bus/usb/devices`，hub（含 root hub）不列出。
-- **`block`**：块设备直通（`<disk type='block'>`），来宾看到的是一块磁盘。来自 `lsblk`，只列整块磁盘，`loop`/`zram`/`nbd`/`sr`/`dm-`/`md` 不列出。挂载时用 `byIdPath`（`/dev/disk/by-id/...`），设备重新插拔后 `/dev/sdX` 可能变化，by-id 路径不会。
+- **`block`**：块设备直通（`<disk type='block'>`），来宾看到的是一块磁盘。来自 `lsblk`，只列整块磁盘，`loop`/`zram`/`nbd`/`sr`/`dm-`/`md` 不列出。挂载时用 `byIdPath`（`/dev/disk/by-id/...`），设备重新插拔后 `/dev/sdX` 可能变化，by-id 路径不会。`byIdPath` 依次优先 `usb-`、`ata-`、`nvme-`、`scsi-`、`wwn-`、`mmc-`、`virtio-`；由盘上内容生成的链接（`lvm-pv-uuid-`、`md-uuid-`、`md-name-`、`dm-uuid-`、`dm-name-`）不会被选用，因为来宾重写磁盘后它们会消失。
 
 USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ 磁盘的 `usbDevice`）。
 
@@ -597,7 +597,7 @@ USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ �
 | `configured on VM [<vm>]` | 已写入某个受管 VM JSON 的 `usbDevices` 或 `blockDevices`（见 [USB 直通](#usb-直通)、[块设备直通](#块设备直通)）。该 VM 停止时没有 domain，但下次启动会再次占用。`configuredOn` 列出这些 VM；USB 硬盘无论以哪种方式配置，两边都会标记 |
 | `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
 | `in use by host: ...` | 主机正在使用：已激活的 LVM/加密/RAID 等子设备；磁盘或分区上叠有内核 holder（`/sys/block/<dev>/holders` 非空，如 dm/md/bcache）；所属 ZFS 池已在主机上导入（`zpool list`；`zpool` 命令失败时保守地视为占用）；或是多盘 btrfs 中未显示挂载点的成员（与已挂载的 btrfs 同 UUID）。只有签名（如 `LVM2_member`、`crypto_LUKS`）而未激活不算：来宾可能在自己的直通盘上建了这些结构 |
-| `cannot check VM attachments: ...` | `virsh list` 或某个 domain 的 `virsh dumpxml` 失败，无法确认设备是否已被 VM 占用（同时出现在 `errors.attached`）。主机上没有 virsh 时视为没有 domain |
+| `cannot check VM attachments: ...` | `virsh list` 或某个 domain 的 `virsh dumpxml` 失败，无法确认设备是否已被 VM 占用（同时出现在 `errors.attached`）。主机上没有 virsh 时视为没有 domain；扫描期间被停止/删除的 domain 直接跳过。domain 按 UUID 查询，名字带空格的 domain 也能正常检查 |
 | `cannot check host use of ...: lsblk failed` | USB 设备带有磁盘，但 `lsblk` 不可用，无法确认主机是否在用 |
 | `cannot read VM JSON of [<vm>] ...` | 某个受管 VM 的 JSON 读不出来，设备占用情况未知（同时出现在 `errors.claims`） |
 
