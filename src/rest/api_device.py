@@ -109,7 +109,8 @@ def list_devices():
 
     devices = discover_devices(device_type)
     if only_attachable:
-        devices = {k: [d for d in v if d["attachable"]] for k, v in devices.items()}
+        devices = {k: ([d for d in v if d["attachable"]] if isinstance(v, list) else v)
+                   for k, v in devices.items()}
 
     return jsonify({
         "success": True,

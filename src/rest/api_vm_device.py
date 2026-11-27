@@ -72,6 +72,39 @@ def _block_key(device):
     return KvmVm.block_device_key(device) if isinstance(path, str) else None
 
 
+def _host_use(disk: dict) -> list:
+    """Why the host itself is using a disk entry (mounts, LVM, holders...)."""
+    uses = []
+    if disk.get("mountpoints"):
+        uses.append(f"mounted on host: {', '.join(disk['mountpoints'])}")
+    if disk.get("hostUse"):
+        uses.append(f"in use by host: {', '.join(disk['hostUse'])}")
+    return uses
+
+
+def _unavailable_reason(name: str, device: dict, disks: list):
+    """Why `device` (a USB or block entry from discover_devices) cannot go to VM `name`.
+
+    The only thing waived is "attached to VM [name]": a stopped persistent domain
+    of this VM attached by hand, which is undefined after the attach anyway. Its
+    precedence in KvmDevice hides the other reasons, so those are re-checked here.
+    """
+    others = [vm for vm in device.get("configuredOn", []) if vm != name]
+    if others:
+        return f"configured on VM [{', '.join(others)}]"
+    if device["attachable"]:
+        return None
+    if device.get("attachedTo") != name:
+        return device["reason"]
+    own_disks = [device] if "path" in device else \
+        [d for d in disks if d["id"] in device.get("blockDevices", [])]
+    for disk in own_disks:
+        uses = _host_use(disk)
+        if uses:
+            return f"{disk['id']} " + "; ".join(uses)
+    return None
+
+
 def _require_stopped(name: str, vm_data: dict):
     """(error response or None, live virsh state). Same rule as eject-iso."""
     if vm_data.get("vmState") != KvmVm.Keyword.VmStates.Stopped:
@@ -159,7 +192,9 @@ def attach_vm_usb(name: str):
         if error is not None:
             return error
 
-        usb_devices = discover_devices(KvmDevice.Keyword.Types.USB)[KvmDevice.Keyword.Types.USB]
+        found = discover_devices()
+        usb_devices = found[KvmDevice.Keyword.Types.USB]
+        host_disks = found[KvmDevice.Keyword.Types.Block]
         if device_id is not None:
             matches = [u for u in usb_devices if u["id"] == device_id]
             if not matches:
@@ -193,13 +228,11 @@ def attach_vm_usb(name: str):
                 f"USB device '{host_device['id']}' ({key}) is already passed through to VM '{name}' "
                 "as a block device; DELETE it from /block first", 409)
 
-        # A stopped persistent domain of this VM may already hold it (attached by
-        # hand): just record it, the domain is undefined below anyway.
-        held_here = host_device.get("attachedTo") == name
-        if not host_device["attachable"] and not held_here:
+        reason = _unavailable_reason(name, host_device, host_disks)
+        if reason is not None:
             return _patch_error(
                 "DEVICE_UNAVAILABLE",
-                f"USB device '{host_device['id']}' ({key}) cannot be attached: {host_device['reason']}", 409)
+                f"USB device '{host_device['id']}' ({key}) cannot be attached: {reason}", 409)
 
         entry = {KvmVm.Keyword.VendorId: vendor_id, KvmVm.Keyword.ProductId: product_id}
         description = " ".join(p for p in (host_device.get("manufacturer"), host_device.get("product")) if p)
@@ -372,13 +405,11 @@ def attach_vm_block(name: str):
                 f"Disk '{disk['id']}' is already passed through to VM '{name}' as USB device "
                 f"{disk.get('usbDevice')}; DELETE it from /usb first", 409)
 
-        # A stopped persistent domain of this VM may already hold it (attached by
-        # hand): just record it, the domain is undefined below anyway.
-        held_here = disk.get("attachedTo") == name
-        if not disk["attachable"] and not held_here:
+        reason = _unavailable_reason(name, disk, disks)
+        if reason is not None:
             return _patch_error(
                 "DEVICE_UNAVAILABLE",
-                f"Disk '{disk['id']}' ({path}) cannot be attached: {disk['reason']}", 409)
+                f"Disk '{disk['id']}' ({path}) cannot be attached: {reason}", 409)
 
         entry = {KvmVm.Keyword.Path: path}
         if disk.get("model"):

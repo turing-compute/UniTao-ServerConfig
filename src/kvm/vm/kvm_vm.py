@@ -205,25 +205,38 @@ class KvmVm:
         return f"{device[KvmVm.Keyword.VendorId]}:{device[KvmVm.Keyword.ProductId]}"
 
     def validate_usb_devices(self):
-        """usbDevices: optional list of {vendorId, productId} (4 lowercase hex digits each)."""
+        """usbDevices: optional list of {vendorId, productId} (4 lowercase hex digits each).
+
+        A malformed entry (hand-edited JSON) is dropped with a warning instead of
+        failing: raising here would block stop/delete too. The usable entries go to
+        self.UsbCfg; self.VmData is left untouched, because it is written back to
+        the JSON (create_ci_user_data) and the entry must not silently vanish.
+        """
+        self.UsbCfg = []
         usb_devices = self.VmData.get(self.Keyword.UsbDevices, None)
         if usb_devices is None:
             return
         if not isinstance(usb_devices, list):
-            raise ValueError(f"Invalid [{self.Keyword.UsbDevices}], expect a list")
+            self.log.warning(f"Ignore [{self.Keyword.UsbDevices}]: expect a list, got [{usb_devices}]")
+            return
         seen = set()
         for device in usb_devices:
+            problem = None
             if not isinstance(device, dict):
-                raise ValueError(f"Invalid [{self.Keyword.UsbDevices}] entry [{device}], expect an object")
-            for key in (self.Keyword.VendorId, self.Keyword.ProductId):
-                value = device.get(key, None)
-                if not isinstance(value, str) or not self._UsbIdPattern.match(value):
-                    raise ValueError(f"Invalid [{self.Keyword.UsbDevices}] entry [{device}], "
-                                     f"[{key}] should be 4 lowercase hex digits")
-            dev_key = self.usb_device_key(device)
-            if dev_key in seen:
-                raise ValueError(f"Duplicate [{self.Keyword.UsbDevices}] entry [{dev_key}]")
-            seen.add(dev_key)
+                problem = "expect an object"
+            else:
+                for key in (self.Keyword.VendorId, self.Keyword.ProductId):
+                    value = device.get(key, None)
+                    if not isinstance(value, str) or not self._UsbIdPattern.match(value):
+                        problem = f"[{key}] should be 4 lowercase hex digits"
+                        break
+            if problem is None and self.usb_device_key(device) in seen:
+                problem = "duplicate"
+            if problem is not None:
+                self.log.warning(f"Ignore [{self.Keyword.UsbDevices}] entry [{device}]: {problem}")
+                continue
+            seen.add(self.usb_device_key(device))
+            self.UsbCfg.append(device)
 
     BlockByIdDir = "/dev/disk/by-id/"
 
@@ -243,25 +256,30 @@ class KvmVm:
 
         by-id only: /dev/sdX names follow probe order and change across replug/reboot.
         A missing or busy device is not an error here (see resolve_passthrough).
+        Malformed entries are dropped with a warning, like validate_usb_devices;
+        the usable ones go to self.BlockCfg.
         """
+        self.BlockCfg = []
         block_devices = self.VmData.get(self.Keyword.BlockDevices, None)
         if block_devices is None:
             return
         if not isinstance(block_devices, list):
-            raise ValueError(f"Invalid [{self.Keyword.BlockDevices}], expect a list")
+            self.log.warning(f"Ignore [{self.Keyword.BlockDevices}]: expect a list, got [{block_devices}]")
+            return
         seen = set()
         for device in block_devices:
-            if not isinstance(device, dict):
-                raise ValueError(f"Invalid [{self.Keyword.BlockDevices}] entry [{device}], expect an object")
-            path = device.get(self.Keyword.Path, None)
+            problem = None
+            path = device.get(self.Keyword.Path, None) if isinstance(device, dict) else None
             if (not isinstance(path, str) or not path.startswith(self.BlockByIdDir)
                     or not self.valid_block_key(path[len(self.BlockByIdDir):])):
-                raise ValueError(f"Invalid [{self.Keyword.BlockDevices}] entry [{device}], "
-                                 f"[{self.Keyword.Path}] should be a {self.BlockByIdDir}<name> path")
-            key = self.block_device_key(device)
-            if key in seen:
-                raise ValueError(f"Duplicate [{self.Keyword.BlockDevices}] entry [{key}]")
-            seen.add(key)
+                problem = f"[{self.Keyword.Path}] should be a {self.BlockByIdDir}<name> path"
+            elif self.block_device_key(device) in seen:
+                problem = "duplicate"
+            if problem is not None:
+                self.log.warning(f"Ignore [{self.Keyword.BlockDevices}] entry [{device}]: {problem}")
+                continue
+            seen.add(self.block_device_key(device))
+            self.BlockCfg.append(device)
 
     @staticmethod
     def usb_hostdev_xml(device: dict) -> str:
@@ -288,12 +306,16 @@ class KvmVm:
         Sets self.PassUsb / self.PassBlock.
         """
         self.PassUsb, self.PassBlock = [], []
-        usb_cfg = self.VmData.get(self.Keyword.UsbDevices, None) or []
-        block_cfg = self.VmData.get(self.Keyword.BlockDevices, None) or []
+        if not hasattr(self, "UsbCfg"):
+            self.validate_usb_devices()
+        if not hasattr(self, "BlockCfg"):
+            self.validate_block_devices()
+        usb_cfg, block_cfg = self.UsbCfg, self.BlockCfg
         if not usb_cfg and not block_cfg:
             return
         # Runs before this VM's domain exists, so "attached to VM" means another VM.
         host = KvmDevice.discover(logger=self.log)
+        lsblk_error = host.get("errors", {}).get(KvmDevice.Keyword.Types.Block)
         skip = "VM [" + self.VmName + "] starts without {what}: {why}"
 
         for device in usb_cfg:
@@ -315,6 +337,9 @@ class KvmVm:
             if not os.path.exists(path):
                 # libvirt has no startupPolicy for block disks.
                 self.log.warning(skip.format(what=f"disk [{path}]", why="not present"))
+                continue
+            if lsblk_error is not None:
+                self.log.warning(skip.format(what=f"disk [{path}]", why=f"cannot check host use: {lsblk_error}"))
                 continue
             real = os.path.realpath(path)
             matches = [b for b in host[KvmDevice.Keyword.Types.Block] if b["path"] == real]
@@ -673,10 +698,25 @@ class KvmVm:
         self.log.info(f"Make sure all disk images created")
         for disk in self.Disks:
             disk.Create()
+        if self.VmData[self.Keyword.VmState] != self.Keyword.VmStates.Running:
+            # `virsh create` boots the domain right away; for a VM meant to stay
+            # stopped that would run the guest (with any passthrough disks and USB
+            # devices) only for sync_vm_state to pull the power. Managed VMs are
+            # transient, so the domain is built on start instead.
+            self.log.info(f"VM [{self.VmName}] desired state is stopped: files prepared, "
+                          f"domain is created on start")
+            return
         vm_create_cmd = self.create_vm_cmd()
         vm_def_create_file = os.path.join(vm_path, f"vm_def_create_{self.VmName}.sh")
         self.log.info(f"Create bash file that can create vm definition XML file. {vm_def_create_file}")
         vm_create_cmd_str = " \\".join(vm_create_cmd)
+        if self.PassUsb:
+            # USB hostdevs are spliced into the XML after virt-install
+            # (add_usb_hostdevs), so this script alone does not reproduce them.
+            vm_create_cmd_str = (
+                "# NOTE: USB devices are not in this command; they are added to the XML\n"
+                f"# afterwards (see vm_def_{self.VmName}.xml): "
+                + ", ".join(self.usb_device_key(d) for d in self.PassUsb) + "\n" + vm_create_cmd_str)
         Util.write_file(vm_def_create_file, "w", vm_create_cmd_str)
         self.log.info("vm def creation bash created.")
         vm_def_file = os.path.join(vm_path, f"vm_def_{self.VmName}.xml")

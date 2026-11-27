@@ -388,14 +388,16 @@ DELETE /api/v1/vms/<name>/block/usb-Seagate_Expansion_HDD_NAAB1-0:0
 
 ### 启动时检查
 
-挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。来宾里看不到某个直通设备时，先查 REST 日志。
+挂载接口的检查只在挂载那一刻有效：之后主机可能挂载了这块盘、另一个 VM 可能先启动占用了它、或插上了相同型号的第二个 USB 设备。所以每次 `start` 生成 domain 时，会对 `usbDevices` / `blockDevices` 再做一次同样的检查（`KvmVm.resolve_passthrough()`），不安全的设备跳过并记 WARNING（`VM [<vm>] starts without ...`），VM 照常启动。来宾里看不到某个直通设备时，先查 REST 日志。`lsblk` 不可用时无法检查主机占用，所有直通磁盘和带磁盘的 USB 设备都会被跳过，日志原因为 `lsblk failed`。
+
+只有 `start` 才会生成 domain：期望状态为 `stopped` 时（`POST /vms` 新建、对已停止的 VM 调 `stop`、PATCH 调和等），只准备 cloud-init ISO 和磁盘镜像，不执行 `virsh create`。以前这些操作会让 VM 开机一瞬间再断电，直通设备会被来宾短暂占用，可能损坏数据。因此 virt-install 参数错误现在在 `start` 时才暴露，而不是 `POST /vms` 时。
 
 另外：
 
 - 挂载接口在检查占用和写 VM JSON 期间持有一把所有 VM 共用的锁，两个请求同时把同一设备挂给不同 VM 时只有一个成功。
 - virsh 状态查询失败时，挂载/卸下返回 500 `SYSTEM_COMMAND_FAILED`，不在不确定 VM 是否运行时修改配置。
 - 同一 VM 已以另一种方式配置了这块 USB 硬盘时返回 409，提示先从 `/usb` 或 `/block` 中 DELETE。
-- VM JSON 中格式不对的条目（手工编辑造成）在 `GET` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON；其余接口跳过它们。
+- VM JSON 中格式不对的条目（手工编辑造成：大写十六进制、`/dev/sdX` 路径、重复等）不会阻止 `start`/`stop`/`delete`：启动时跳过并记 WARNING（`Ignore [usbDevices] entry ...`），JSON 原样保留。`GET /vms/<name>/usb|block` 中以 `"key": null, "error": ...` 列出，需手工修正 JSON。
 
 ### VM 认证方式
 
@@ -590,7 +592,8 @@ USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ �
 | `attached to VM [<vm>]` | 已挂在某个 libvirt domain 上（`virsh dumpxml` 中有对应的 `hostdev`/`disk`）。USB 硬盘无论以哪种方式挂出，两边都会标记 |
 | `configured on VM [<vm>]` | 已写入某个受管 VM JSON 的 `usbDevices` 或 `blockDevices`（见 [USB 直通](#usb-直通)、[块设备直通](#块设备直通)）。该 VM 停止时没有 domain，但下次启动会再次占用。`configuredOn` 列出这些 VM；USB 硬盘无论以哪种方式配置，两边都会标记 |
 | `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
-| `in use by host: ...` | 磁盘承载 LVM、RAID、LUKS 或 ZFS 成员 |
+| `in use by host: ...` | 磁盘承载 LVM、RAID、LUKS、ZFS 或 bcache 成员；磁盘或分区上叠有内核 holder（`/sys/block/<dev>/holders` 非空，如 dm/md/bcache）；或是多盘 btrfs 中未显示挂载点的成员（与已挂载的 btrfs 同 UUID） |
+| `cannot check host use of ...: lsblk failed` | USB 设备带有磁盘，但 `lsblk` 不可用，无法确认主机是否在用 |
 
 主机和 VM 同时写同一块盘会损坏数据，所以挂载前先在主机上 `umount`。
 
@@ -631,7 +634,7 @@ GET /api/v1/devices
 }
 ```
 
-USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。
+USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。`lsblk` 不可用时 `block` 为空列表，并多出 `"errors": {"block": "lsblk failed: ..."}`。
 
 命令行同样可用：`./src/runpy.sh src/kvm/device/kvm_device.py [--type usb|block]`。
 

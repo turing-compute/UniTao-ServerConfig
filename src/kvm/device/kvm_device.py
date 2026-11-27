@@ -69,7 +69,9 @@ class KvmDevice:
     # by-id link prefixes in order of preference (stable, human-readable first).
     _ByIdPreference = ("usb-", "ata-", "nvme-", "scsi-")
     # lsblk child types that mean the host is using the disk.
-    _HostUseTypes = ("lvm", "crypt", "raid", "dmraid", "mpath")
+    _HostUseTypes = ("lvm", "crypt", "raid", "dmraid", "mpath", "bcache")
+    # lsblk fstypes that mean the host (or a stacked device) owns the disk.
+    _HostUseFsTypes = ("LVM2_member", "linux_raid_member", "crypto_LUKS", "zfs_member", "bcache")
 
     @staticmethod
     def parse_args() -> argparse.Namespace:
@@ -82,20 +84,33 @@ class KvmDevice:
 
     @staticmethod
     def discover(device_type: str = None, logger: logging.Logger = None) -> dict:
-        """Return {"usb": [...], "block": [...]} (only the requested type when given)."""
+        """Return {"usb": [...], "block": [...]} (only the requested type when given).
+
+        When lsblk fails the block list is empty and result["errors"]["block"] says
+        why; USB devices that carry disks are then not attachable, since their host
+        mounts cannot be checked.
+        """
         if device_type is not None and device_type not in KvmDevice.Keyword.Types.list():
             raise ValueError(f"Invalid device type [{device_type}], expect {KvmDevice.Keyword.Types.list()}")
 
         attached = KvmDevice.attached_devices(logger)
         usb_devices = KvmDevice.discover_usb()
-        block_devices = KvmDevice.discover_block(logger)
-        KvmDevice._resolve_state(usb_devices, block_devices, attached)
+        errors = {}
+        try:
+            block_devices = KvmDevice.discover_block(logger)
+        except SystemError as e:
+            block_devices = []
+            errors[KvmDevice.Keyword.Types.Block] = str(e)
+        KvmDevice._resolve_state(usb_devices, block_devices, attached,
+                                 block_error=errors.get(KvmDevice.Keyword.Types.Block))
 
         result = {}
         if device_type in (None, KvmDevice.Keyword.Types.USB):
             result[KvmDevice.Keyword.Types.USB] = usb_devices
         if device_type in (None, KvmDevice.Keyword.Types.Block):
             result[KvmDevice.Keyword.Types.Block] = block_devices
+        if errors:
+            result["errors"] = errors
         return result
 
     @staticmethod
@@ -138,8 +153,14 @@ class KvmDevice:
 
     @staticmethod
     def discover_block(logger: logging.Logger = None) -> list:
-        """Whole disks from lsblk, with partitions/children and host mountpoints."""
+        """Whole disks from lsblk, with partitions/children and host mountpoints.
+
+        Raises SystemError when lsblk is missing or fails: an empty list would
+        read as "no disks" rather than "unknown".
+        """
         tree = KvmDevice._lsblk(logger)
+        mounted_btrfs = set()
+        KvmDevice._mounted_btrfs_uuids(tree, mounted_btrfs)
         by_id = KvmDevice._by_id_map()
         usb_of = KvmDevice._block_usb_parent()
         devices = []
@@ -151,7 +172,8 @@ class KvmDevice:
                 continue
             mountpoints = []
             host_uses = []
-            KvmDevice._collect_usage(node, mountpoints, host_uses)
+            KvmDevice._collect_usage(node, mountpoints, host_uses, mounted_btrfs)
+            host_uses.extend(KvmDevice._holders(name, [c.get("name") for c in node.get("children", []) or []]))
             path = os.path.join(KvmDevice.DevDir, name)
             devices.append({
                 "id": name,
@@ -224,7 +246,7 @@ class KvmDevice:
     # ───────────────────────────── state resolution ─────────────────────────────
 
     @staticmethod
-    def _resolve_state(usb_devices: list, block_devices: list, attached: dict):
+    def _resolve_state(usb_devices: list, block_devices: list, attached: dict, block_error: str = None):
         """Fill attachedTo / attachable / reason on both lists, cross-linking USB disks."""
         block_by_name = {b["id"]: b for b in block_devices}
 
@@ -258,6 +280,8 @@ class KvmDevice:
                         break
             if usb["attachedTo"] is not None:
                 reason = f"attached to VM [{usb['attachedTo']}]"
+            elif block_error is not None and usb["blockDevices"]:
+                reason = f"cannot check host use of {', '.join(usb['blockDevices'])}: lsblk failed"
             else:
                 for name in usb["blockDevices"]:
                     blk = block_by_name.get(name)
@@ -342,11 +366,11 @@ class KvmDevice:
 
     @staticmethod
     def _lsblk(logger: logging.Logger = None) -> list:
-        """lsblk tree, or [] (with a warning) when lsblk is missing or fails.
+        """lsblk tree; raises SystemError (after a warning) when lsblk is missing or fails.
 
         No PATH column (util-linux >= 2.33 only): the path is <DevDir>/<NAME>.
         """
-        columns = "NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,FSTYPE"
+        columns = "NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,FSTYPE,UUID"
         errors = []
         # MOUNTPOINTS (util-linux >= 2.37) lists every mount; fall back to MOUNTPOINT.
         for mount_col in ("MOUNTPOINTS", "MOUNTPOINT"):
@@ -357,8 +381,8 @@ class KvmDevice:
             except (SystemError, OSError, ValueError) as e:
                 errors.append(str(e))
         if logger:
-            logger.warning(f"lsblk failed, no block devices listed: {errors[-1]}")
-        return []
+            logger.warning(f"lsblk failed, block devices unknown: {errors[-1]}")
+        raise SystemError(f"lsblk failed: {errors[-1]}")
 
     @staticmethod
     def _node_mountpoints(node: dict) -> list:
@@ -368,18 +392,47 @@ class KvmDevice:
         return [p for p in points if p]
 
     @staticmethod
-    def _collect_usage(node: dict, mountpoints: list, host_uses: list):
-        for point in KvmDevice._node_mountpoints(node):
+    def _collect_usage(node: dict, mountpoints: list, host_uses: list, mounted_btrfs: set = frozenset()):
+        points = KvmDevice._node_mountpoints(node)
+        for point in points:
             if point not in mountpoints:
                 mountpoints.append(point)
         node_type = node.get("type") or ""
         if node_type.startswith(KvmDevice._HostUseTypes):
             host_uses.append(node_type)
         fstype = node.get("fstype") or ""
-        if fstype in ("LVM2_member", "linux_raid_member", "crypto_LUKS", "zfs_member"):
+        if fstype in KvmDevice._HostUseFsTypes:
             host_uses.append(fstype)
+        # Multi-device btrfs shows its mountpoint on one member only.
+        if fstype == "btrfs" and not points and node.get("uuid") in mounted_btrfs:
+            host_uses.append("btrfs (member of a mounted filesystem)")
         for child in node.get("children", []) or []:
-            KvmDevice._collect_usage(child, mountpoints, host_uses)
+            KvmDevice._collect_usage(child, mountpoints, host_uses, mounted_btrfs)
+
+    @staticmethod
+    def _mounted_btrfs_uuids(nodes: list, result: set):
+        for node in nodes or []:
+            if node.get("fstype") == "btrfs" and node.get("uuid") and KvmDevice._node_mountpoints(node):
+                result.add(node["uuid"])
+            KvmDevice._mounted_btrfs_uuids(node.get("children", []), result)
+
+    @staticmethod
+    def _holders(disk: str, partitions: list) -> list:
+        """Kernel holders (dm/md/bcache/...) stacked on the disk or its partitions.
+
+        Catches host use that lsblk types/fstypes miss, e.g. bcache backing devices.
+        """
+        uses = []
+        for part in [None] + [p for p in partitions if p]:
+            base = os.path.join(KvmDevice.SysBlockDir, disk) if part is None \
+                else os.path.join(KvmDevice.SysBlockDir, disk, part)
+            try:
+                holders = sorted(os.listdir(os.path.join(base, "holders")))
+            except OSError:
+                continue
+            if holders:
+                uses.append(f"holder of {part or disk}: {', '.join(holders)}")
+        return uses
 
     @staticmethod
     def _by_id_map() -> dict:
