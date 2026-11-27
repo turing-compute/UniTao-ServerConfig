@@ -108,13 +108,18 @@ class Util:
         """Replace a file's content atomically (temp file in the same dir + rename).
 
         Readers never see a truncated or half-written file. The target's mode is
-        kept (0644 for a new file) and a symlink is written through, like a plain
-        open("w") would. The temp name ends in .tmp so *.json listings skip it.
+        kept (0644 for a new file), and so are its owner and group when running as
+        root; a symlink is written through, like a plain open("w") would. Unlike
+        open("w"), this needs write permission on the directory. The temp name ends
+        in .tmp so *.json listings skip it.
         """
         target = os.path.realpath(file_path)
         directory = os.path.dirname(target)
+        owner = None
         try:
-            mode = stat.S_IMODE(os.stat(target).st_mode)
+            st = os.stat(target)
+            mode = stat.S_IMODE(st.st_mode)
+            owner = (st.st_uid, st.st_gid)
         except FileNotFoundError:
             mode = 0o644
         fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(target)}-", suffix=".tmp", dir=directory)
@@ -122,6 +127,8 @@ class Util:
             with os.fdopen(fd, "w") as fp:
                 fp.write(text)
             os.chmod(tmp_path, mode)
+            if owner is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
+                os.chown(tmp_path, *owner)
             os.replace(tmp_path, target)
         except Exception:
             if os.path.exists(tmp_path):

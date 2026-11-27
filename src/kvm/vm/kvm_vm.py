@@ -340,6 +340,12 @@ class KvmVm:
                     f"{len(matches)} host devices share it ({', '.join(m['id'] for m in matches)})")))
             elif matches and not matches[0]["attachable"]:
                 self._pass_warn(skip.format(what=f"USB [{key}]", why=matches[0]["reason"]))
+            elif not matches and KvmDevice.raw_usb_ids(device[self.Keyword.VendorId], device[self.Keyword.ProductId]):
+                # Plugged in but hidden by discovery (a hub, or unreadable sysfs):
+                # passing a hub through would take every device behind it.
+                raw = KvmDevice.raw_usb_ids(device[self.Keyword.VendorId], device[self.Keyword.ProductId])
+                kind = "a USB hub" if any(is_hub for _, is_hub in raw) else "not an attachable USB device"
+                self._pass_warn(skip.format(what=f"USB [{key}]", why=f"{', '.join(n for n, _ in raw)} is {kind}"))
             else:
                 # Not plugged in is fine: startupPolicy='optional'.
                 self.PassUsb.append(device)
@@ -765,13 +771,21 @@ class KvmVm:
         ]
         if KvmVm.Keyword.HostCPU in self.VmData and self.VmData[KvmVm.Keyword.HostCPU]:
             vm_create_cmd.append(f"  --cpu host")
-        for disk in self.Disks:
-            vm_create_cmd.append(f"  --disk {disk.disk_cmd()}")
-        for net in self.Networks:
-            vm_create_cmd.append(f"  --network {net.net_cmd()}")
         if passthrough:
             self.resolve_passthrough()
-        for device in (self.PassBlock if passthrough else []):
+        pass_block = self.PassBlock if passthrough else []
+        # With passthrough disks, "--boot hd" would also try them (a bootable one
+        # could win over a blank OS disk and skip the installer). Give the OS disks
+        # and the install ISO explicit per-device boot order instead; passthrough
+        # disks get none, so firmware never boots them. virt-install drops the
+        # legacy <boot dev> once a device has an order (libvirt forbids both).
+        boot_order = iter(range(1, 100)) if pass_block else None
+        for disk in self.Disks:
+            order = f",boot_order={next(boot_order)}" if boot_order else ""
+            vm_create_cmd.append(f"  --disk {disk.disk_cmd()}{order}")
+        for net in self.Networks:
+            vm_create_cmd.append(f"  --network {net.net_cmd()}")
+        for device in pass_block:
             path = device[self.Keyword.Path]
             vm_create_cmd.append(f"  --disk path={path},format=raw,bus=virtio,cache=none,io=native")
         if self.VmData[self.Keyword.UseCloudInit]:
@@ -781,8 +795,11 @@ class KvmVm:
             # Boot the disk first: a blank disk is not bootable so the installer
             # runs from the ISO; once installed, reboots go straight to the disk
             # instead of looping back into the installer.
-            vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom")
-            vm_create_cmd.append(f"  --boot hd,cdrom")
+            if boot_order:
+                vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom,boot_order={next(boot_order)}")
+            else:
+                vm_create_cmd.append(f"  --disk path={install_iso_path},device=cdrom")
+                vm_create_cmd.append(f"  --boot hd,cdrom")
         # VNC only on loopback: reach it through the REST web console
         # (GET /api/v1/vms/<name>/console) or an SSH tunnel.
         vm_create_cmd.append(f"  --graphics vnc,listen=127.0.0.1")

@@ -70,9 +70,11 @@ class KvmDevice:
     # by-id link prefixes in order of preference (stable, human-readable first).
     _ByIdPreference = ("usb-", "ata-", "nvme-", "scsi-")
     # lsblk child types that mean the host is using the disk.
+    # A signature alone (fstype LVM2_member, crypto_LUKS, ...) is NOT host use: the
+    # guest may have written it on its own passthrough disk. Host use is what is
+    # active on the host: these child types, kernel holders, mounts, an imported
+    # ZFS pool, or a member of a mounted multi-device btrfs.
     _HostUseTypes = ("lvm", "crypt", "raid", "dmraid", "mpath", "bcache")
-    # lsblk fstypes that mean the host (or a stacked device) owns the disk.
-    _HostUseFsTypes = ("LVM2_member", "linux_raid_member", "crypto_LUKS", "zfs_member", "bcache")
 
     @staticmethod
     def parse_args() -> argparse.Namespace:
@@ -112,6 +114,13 @@ class KvmDevice:
             result[KvmDevice.Keyword.Types.USB] = usb_devices
         if device_type in (None, KvmDevice.Keyword.Types.Block):
             result[KvmDevice.Keyword.Types.Block] = block_devices
+        if attached.get("error"):
+            errors["attached"] = attached["error"]
+            why = f"cannot check VM attachments: {attached['error']}"
+            for device in usb_devices + block_devices:
+                if device["attachable"]:
+                    device["attachable"] = False
+                    device["reason"] = why
         if errors:
             result["errors"] = errors
         return result
@@ -155,6 +164,28 @@ class KvmDevice:
         return devices
 
     @staticmethod
+    def raw_usb_ids(vendor_id: str, product_id: str) -> list:
+        """[(sysfs name, is_hub)] for every USB device with these ids, hubs included.
+
+        discover_usb() hides hubs, so "not in discover_usb()" does not mean "not
+        plugged in".
+        """
+        found = []
+        if not os.path.isdir(KvmDevice.SysUsbDir):
+            return found
+        for name in sorted(os.listdir(KvmDevice.SysUsbDir)):
+            if ":" in name:
+                continue
+            dev_dir = os.path.join(KvmDevice.SysUsbDir, name)
+            if (KvmDevice._read_sys(dev_dir, "idVendor") or "").lower() != vendor_id \
+                    or (KvmDevice._read_sys(dev_dir, "idProduct") or "").lower() != product_id:
+                continue
+            is_hub = KvmDevice._read_sys(dev_dir, "bDeviceClass") == KvmDevice.UsbClassHub \
+                or KvmDevice._usb_interface_classes(dev_dir) == [KvmDevice.UsbClassNames[KvmDevice.UsbClassHub]]
+            found.append((name, is_hub))
+        return found
+
+    @staticmethod
     def discover_block(logger: logging.Logger = None, tree: list = None) -> list:
         """Whole disks from lsblk, with partitions/children and host mountpoints.
 
@@ -163,8 +194,7 @@ class KvmDevice:
         """
         if tree is None:
             tree = KvmDevice._lsblk(logger)
-        mounted_btrfs = set()
-        KvmDevice._mounted_btrfs_uuids(tree, mounted_btrfs)
+        ctx = KvmDevice._usage_context(tree)
         by_id = KvmDevice._by_id_map()
         usb_of = KvmDevice._block_usb_parent()
         devices = []
@@ -176,7 +206,7 @@ class KvmDevice:
                 continue
             mountpoints = []
             host_uses = []
-            KvmDevice._collect_usage(node, mountpoints, host_uses, mounted_btrfs)
+            KvmDevice._collect_usage(node, mountpoints, host_uses, ctx)
             host_uses.extend(KvmDevice._holders(name, [c.get("name") for c in node.get("children", []) or []]))
             path = os.path.join(KvmDevice.DevDir, name)
             devices.append({
@@ -208,15 +238,19 @@ class KvmDevice:
     def attached_devices(logger: logging.Logger = None) -> dict:
         """Devices already attached to libvirt domains (running or defined).
 
-        Returns {"usb": [{vendorId, productId, bus, device, vm}], "block": {realpath: vm}}.
-        Returns empty maps when virsh is unavailable.
+        Returns {"usb": [{vendorId, productId, bus, device, vm}], "block": {realpath: vm}},
+        plus "error" when virsh failed: the maps are then incomplete, and a device
+        missing from them must not be taken as free.
         """
         attached = {"usb": [], "block": {}}
         try:
             domains = [d for d in Util.run_command("virsh list --all --name").stdout_lines if d.strip()]
+        except FileNotFoundError:
+            return attached  # no virsh binary: no libvirt, so no domain holds anything
         except Exception as e:
             if logger:
                 logger.warning(f"Cannot list libvirt domains, attachment state unknown: {e}")
+            attached["error"] = f"virsh list failed: {e}"
             return attached
         for vm in domains:
             try:
@@ -225,6 +259,7 @@ class KvmDevice:
             except Exception as e:
                 if logger:
                     logger.warning(f"Cannot read definition of VM [{vm}]: {e}")
+                attached["error"] = f"virsh dumpxml {vm} failed: {e}"
                 continue
             for hostdev in root.findall("./devices/hostdev[@type='usb']"):
                 source = hostdev.find("source")
@@ -396,7 +431,7 @@ class KvmDevice:
 
         No PATH column (util-linux >= 2.33 only): the path is <DevDir>/<NAME>.
         """
-        columns = "NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,FSTYPE,UUID"
+        columns = "NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,FSTYPE,UUID,LABEL"
         errors = []
         # MOUNTPOINTS (util-linux >= 2.37) lists every mount; fall back to MOUNTPOINT.
         for mount_col in ("MOUNTPOINTS", "MOUNTPOINT"):
@@ -418,7 +453,25 @@ class KvmDevice:
         return [p for p in points if p]
 
     @staticmethod
-    def _collect_usage(node: dict, mountpoints: list, host_uses: list, mounted_btrfs: set = frozenset()):
+    def _usage_context(tree: list) -> dict:
+        """Host-wide facts _collect_usage needs: mounted btrfs UUIDs, imported zpools."""
+        mounted_btrfs = set()
+        KvmDevice._mounted_btrfs_uuids(tree, mounted_btrfs)
+        return {"mounted_btrfs": mounted_btrfs, "zpools": KvmDevice._imported_zpools()}
+
+    @staticmethod
+    def _imported_zpools():
+        """Names of imported ZFS pools; set() without ZFS tools; None if zpool fails."""
+        try:
+            return {n.strip() for n in Util.run_command("zpool list -H -o name").stdout_lines if n.strip()}
+        except OSError:
+            return set()  # no zpool binary: no ZFS on this host
+        except SystemError:
+            return None
+
+    @staticmethod
+    def _collect_usage(node: dict, mountpoints: list, host_uses: list, ctx: dict = None):
+        ctx = ctx or {"mounted_btrfs": set(), "zpools": set()}
         points = KvmDevice._node_mountpoints(node)
         for point in points:
             if point not in mountpoints:
@@ -427,25 +480,30 @@ class KvmDevice:
         if node_type.startswith(KvmDevice._HostUseTypes):
             host_uses.append(node_type)
         fstype = node.get("fstype") or ""
-        if fstype in KvmDevice._HostUseFsTypes:
-            host_uses.append(fstype)
         # Multi-device btrfs shows its mountpoint on one member only.
-        if fstype == "btrfs" and not points and node.get("uuid") in mounted_btrfs:
+        if fstype == "btrfs" and not points and node.get("uuid") in ctx["mounted_btrfs"]:
             host_uses.append("btrfs (member of a mounted filesystem)")
+        # An imported pool leaves no holder or device mountpoint behind.
+        if fstype == "zfs_member":
+            if ctx["zpools"] is None:
+                host_uses.append("zfs_member (cannot list imported pools)")
+            elif node.get("label") in ctx["zpools"]:
+                host_uses.append(f"zfs pool {node.get('label')} (imported)")
         for child in node.get("children", []) or []:
-            KvmDevice._collect_usage(child, mountpoints, host_uses, mounted_btrfs)
+            KvmDevice._collect_usage(child, mountpoints, host_uses, ctx)
 
     @staticmethod
     def _other_block_usage(tree: list) -> dict:
         """{name: reason} for top-level lsblk devices that discover_block leaves out
         (sr, loop, ...) but that are in use on the host."""
         result = {}
+        ctx = KvmDevice._usage_context(tree)
         for node in tree:
             name = node.get("name")
             if not name or (node.get("type") == "disk" and not name.startswith(KvmDevice._SkipBlockPrefixes)):
                 continue
             mountpoints, host_uses = [], []
-            KvmDevice._collect_usage(node, mountpoints, host_uses)
+            KvmDevice._collect_usage(node, mountpoints, host_uses, ctx)
             if mountpoints:
                 result[name] = f"mounted on host: {', '.join(mountpoints)}"
             elif host_uses:

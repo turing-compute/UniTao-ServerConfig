@@ -126,6 +126,17 @@ def _unavailable_reason(name: str, device: dict, found: dict):
         uses = _host_use(disk)
         if uses:
             return f"{disk['id']} " + "; ".join(uses)
+    listed = {d["id"] for d in disks}
+    unlisted = [n for n in device.get("blockDevices", []) if n not in listed]
+    if unlisted:
+        # e.g. a USB optical drive's sr0: not in the disk list, still checked.
+        try:
+            other = KvmDevice._other_block_usage(KvmDevice._lsblk(_get_logger()))
+        except SystemError as e:
+            return f"cannot check host use: {e}"
+        for n in unlisted:
+            if other.get(n):
+                return f"{n} {other[n]}"
     return None
 
 
@@ -154,15 +165,24 @@ def _require_stopped(name: str, vm_data: dict):
     return None, live_state
 
 
-def _undefine_if_persistent(vm_name: str, live_state: str, warnings: list):
-    """A stopped persistent domain would be reused on start without the change;
-    undefine it so the next start rebuilds the domain from the VM JSON."""
+def _undefine_if_persistent(vm_name: str, live_state: str):
+    """A stopped persistent domain would be reused on start without the change
+    (create_vm skips an existing domain, and its passthrough checks with it).
+    Undefine it first, so the next start rebuilds the domain from the VM JSON.
+
+    Returns an error response when undefine fails; the caller must then leave
+    the VM JSON unchanged, or the API would report a change that never applies.
+    """
     if live_state != KvmVm.Keyword.VmStates.Stopped:
-        return
+        return None
     try:
         Util.run_command(f"virsh undefine {vm_name}")
     except SystemError as e:
-        warnings.append(f"Failed to undefine persistent domain '{vm_name}': {e}")
+        return _patch_error(
+            "SYSTEM_COMMAND_FAILED",
+            f"Cannot undefine the persistent domain of VM '{vm_name}', nothing changed "
+            f"(undefine it by hand, e.g. `virsh undefine --nvram {vm_name}`): {e}", 500)
+    return None
 
 
 @vm_device_bp.route("/<name>/usb", methods=["GET"])
@@ -281,11 +301,12 @@ def attach_vm_usb(name: str):
         if description:
             entry["description"] = description
 
+        error = _undefine_if_persistent(name, live_state)
+        if error is not None:
+            return error
         vm_data[KvmVm.Keyword.UsbDevices] = configured + [entry]
         _atomic_write_json(vm_json_path(current_app, name), vm_data)
-
         warnings = []
-        _undefine_if_persistent(name, live_state, warnings)
         logger.info("Attached USB [%s] (%s) to VM [%s]", key, host_device["id"], name)
         return jsonify({
             "success": True,
@@ -318,14 +339,15 @@ def detach_vm_usb(name: str, key: str):
         if len(remaining) == len(configured):
             return _patch_error("NOT_FOUND", f"USB device '{key}' is not configured on VM '{name}'", 404)
 
+        error = _undefine_if_persistent(name, live_state)
+        if error is not None:
+            return error
         if remaining:
             vm_data[KvmVm.Keyword.UsbDevices] = remaining
         else:
             vm_data.pop(KvmVm.Keyword.UsbDevices, None)
         _atomic_write_json(vm_json_path(current_app, name), vm_data)
-
         warnings = []
-        _undefine_if_persistent(name, live_state, warnings)
         logger.info("Detached USB [%s] from VM [%s]", key, name)
         return jsonify({
             "success": True,
@@ -422,10 +444,12 @@ def attach_vm_block(name: str):
                 return _patch_error("DEVICE_NOT_FOUND", f"Disk '{device_id}' not found on host", 404)
             disk = matches[0]
             path = disk["byIdPath"]
+            if path is not None and not KvmVm.valid_block_key(os.path.basename(path)):
+                path = None  # a name start-time validation would reject
             if path is None:
                 return _patch_error(
                     "NO_STABLE_PATH",
-                    f"Disk '{device_id}' has no {KvmVm.BlockByIdDir} link; "
+                    f"Disk '{device_id}' has no usable {KvmVm.BlockByIdDir} link; "
                     "/dev/sdX names are not stable enough to record", 409)
         else:
             if not os.path.exists(path):
@@ -467,11 +491,12 @@ def attach_vm_block(name: str):
         entry = {KvmVm.Keyword.Path: path}
         if disk.get("model"):
             entry["description"] = disk["model"]
+        error = _undefine_if_persistent(name, live_state)
+        if error is not None:
+            return error
         vm_data[KvmVm.Keyword.BlockDevices] = configured + [entry]
         _atomic_write_json(vm_json_path(current_app, name), vm_data)
-
         warnings = []
-        _undefine_if_persistent(name, live_state, warnings)
         logger.info("Attached disk [%s] (%s) to VM [%s]", path, disk["id"], name)
         return jsonify({
             "success": True,
@@ -502,14 +527,15 @@ def detach_vm_block(name: str, key: str):
         if len(remaining) == len(configured):
             return _patch_error("NOT_FOUND", f"Disk '{key}' is not configured on VM '{name}'", 404)
 
+        error = _undefine_if_persistent(name, live_state)
+        if error is not None:
+            return error
         if remaining:
             vm_data[KvmVm.Keyword.BlockDevices] = remaining
         else:
             vm_data.pop(KvmVm.Keyword.BlockDevices, None)
         _atomic_write_json(vm_json_path(current_app, name), vm_data)
-
         warnings = []
-        _undefine_if_persistent(name, live_state, warnings)
         logger.info("Detached disk [%s] from VM [%s]", key, name)
         return jsonify({
             "success": True,
