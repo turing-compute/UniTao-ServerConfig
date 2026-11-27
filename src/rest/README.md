@@ -581,6 +581,7 @@ GET /api/v1/vms/<name>/inventory/<file>
 | GET | `/api/v1/devices` | 列出 USB 设备和整块磁盘 |
 | GET | `/api/v1/devices?type=usb` | 只列 USB 设备（`type=block` 只列磁盘） |
 | GET | `/api/v1/devices?attachable=true` | 只列当前可挂载的设备 |
+| GET | `/api/v1/devices/<id>` | 查看单个设备（`id` 为 USB 的 sysfs 名如 `2-1`，或磁盘名如 `sdb`） |
 
 两类设备对应两种挂法：
 
@@ -642,7 +643,21 @@ GET /api/v1/devices
 }
 ```
 
-USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。`lsblk` 不可用时 `block` 为空列表，并多出 `"errors": {"block": "lsblk failed: ..."}`。`speedMbps` 为数字（如 `480`、`1.5`），读不到时为 `null`。
+USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。主机上没有 `virsh` 时 `attachedTo` 一律为 `null`；`virsh` 查询失败时多出 `errors.attached`，所有设备不可挂。`lsblk` 不可用时 `block` 为空列表，并多出 `"errors": {"block": "lsblk failed: ..."}`。`speedMbps` 为数字（如 `480`、`1.5`），读不到时为 `null`。
+
+### 单个设备
+
+`GET /api/v1/devices/<id>` 返回与列表中相同的字段，外加 `type`（`usb` / `block`）。USB 硬盘在两边都有条目，所以会一并带上另一边：
+
+- USB 设备多出 `disks`：它对应的磁盘条目（挂载点、`byIdPath`、`hostUse` 等），不是硬盘时为 `[]`。
+- 磁盘多出 `usb`：所在的 USB 设备条目，不是 USB 磁盘时为 `null`。
+
+发现过程有错误（`lsblk`、`virsh` 失败或 VM JSON 读不出）时，结果中同样带 `errors`。找不到设备返回 404 `DEVICE_NOT_FOUND`。
+
+```bash
+curl -sS http://<host>:5000/api/v1/devices/2-1
+curl -sS http://<host>:5000/api/v1/devices/sdb
+```
 
 命令行同样可用：`./src/runpy.sh src/kvm/device/kvm_device.py [--type usb|block]`。
 
