@@ -109,6 +109,27 @@ def apply_vm_claims(devices: dict, claims: dict):
                     device["reason"] = why
 
 
+# Fields kept in the list view; GET /devices/<id> (or ?detail=true) has the rest.
+_SummaryFields = {
+    KvmDevice.Keyword.Types.USB: ("id", "vendorId", "productId", "manufacturer", "product",
+                                  "blockDevices", "attachable", "reason"),
+    KvmDevice.Keyword.Types.Block: ("id", "sizeBytes", "model", "transport", "usbDevice",
+                                    "attachable", "reason"),
+}
+
+
+def summarize(devices: dict) -> dict:
+    """List view: id and basic state per device; other keys (errors) unchanged."""
+    result = {}
+    for key, value in devices.items():
+        fields = _SummaryFields.get(key)
+        if fields is None or not isinstance(value, list):
+            result[key] = value
+        else:
+            result[key] = [{f: d.get(f) for f in fields} for d in value]
+    return result
+
+
 def discover_devices(device_type: str = None) -> dict:
     """KvmDevice.discover() plus the claims of managed VM JSONs."""
     devices = KvmDevice.discover(device_type, _get_logger())
@@ -123,6 +144,7 @@ def list_devices():
     Query:
         type        usb | block (default: both)
         attachable  true → only devices that can be attached now
+        detail      true → every field (default: id and basic state; see GET /<id>)
     """
     device_type = request.args.get("type", None)
     if device_type is not None and device_type not in KvmDevice.Keyword.Types.list():
@@ -133,11 +155,14 @@ def list_devices():
         }), 400
 
     only_attachable = request.args.get("attachable", "").lower() in ("1", "true", "yes")
+    detail = request.args.get("detail", "").lower() in ("1", "true", "yes")
 
     devices = discover_devices(device_type)
     if only_attachable:
         devices = {k: ([d for d in v if d["attachable"]] if isinstance(v, list) else v)
                    for k, v in devices.items()}
+    if not detail:
+        devices = summarize(devices)
 
     return jsonify({
         "success": True,

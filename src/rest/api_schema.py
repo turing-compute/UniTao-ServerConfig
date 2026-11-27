@@ -60,7 +60,7 @@ _API_SCHEMA = {
         "devices": {
             "description": "Host devices that can be passed through to a VM (read-only discovery)",
             "endpoints": {
-                "GET /api/v1/devices": "List host USB devices and whole disks with attachable/reason, attachedTo (libvirt domain) and configuredOn (managed VM JSONs). Query: type (usb|block), attachable=true (only attachable ones). errors lists discovery failures (block, attached, claims)",
+                "GET /api/v1/devices": "List host USB devices and whole disks: id and basic state only (usb: vendorId, productId, manufacturer, product, blockDevices; block: sizeBytes, model, transport, usbDevice; both: attachable, reason). Query: type (usb|block), attachable=true (only attachable ones), detail=true (every field, as GET /api/v1/devices/<id>). errors lists discovery failures (block, attached, claims)",
                 "GET /api/v1/devices/<id>": "One host device by id (USB sysfs name such as 2-1, or disk name such as sdb). Same fields as the list plus type; a USB device also carries disks (its block entries), a disk on USB carries usb. 404 DEVICE_NOT_FOUND if absent",
             },
         },
