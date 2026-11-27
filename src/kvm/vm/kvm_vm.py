@@ -11,6 +11,8 @@ import argparse
 import json
 import logging
 import os
+import re
+import xml.etree.ElementTree as ET
 
 from security.key_manager import KeyManager
 from security.password_gen import generate_password
@@ -19,6 +21,10 @@ from shared.utilities import Util
 
 from kvm.image.kvm_image import KvmImage
 from network.bridge.net_bridge import NetBridge
+
+# virt-install writes <libosinfo:libosinfo> into <metadata>; keep the prefix when
+# the generated domain XML is rewritten (add_usb_hostdevs).
+ET.register_namespace("libosinfo", "http://libosinfo.org/xmlns/libvirt/domain/1.0")
 
 class KvmVm:
     class Keyword:
@@ -37,6 +43,9 @@ class KvmVm:
         InstallIsoPath = "installIsoPath"
         VmHostName = "vmHostName"
         HostCPU = "hostCPU"
+        UsbDevices = "usbDevices"
+        VendorId = "vendorId"
+        ProductId = "productId"
         Login = "login"
 
         class AuthTypes:
@@ -174,6 +183,7 @@ class KvmVm:
             if not os.path.isfile(real_install_iso_path):
                 raise ValueError(f"[{self.Keyword.InstallIsoPath}] does not exist [{real_install_iso_path}]")
             self.VmData[self.Keyword.InstallIsoPath] = real_install_iso_path
+        self.validate_usb_devices()
         os_type = self.VmData.get(self.Keyword.OsType, None)
         if os_type is None:
             raise ValueError(f"Missing field[{self.Keyword.OsType}] in Vm Data")
@@ -182,6 +192,69 @@ class KvmVm:
         os_variant = self.VmData.get(self.Keyword.OsVariant, None)
         if os_variant is None:
             raise ValueError(f"Missing field[{self.Keyword.OsVariant}] in Vm Data")
+
+    _UsbIdPattern = re.compile(r"^[0-9a-f]{4}$")
+
+    @staticmethod
+    def usb_device_key(device: dict) -> str:
+        """Identity of a usbDevices entry: "<vendorId>:<productId>"."""
+        return f"{device[KvmVm.Keyword.VendorId]}:{device[KvmVm.Keyword.ProductId]}"
+
+    def validate_usb_devices(self):
+        """usbDevices: optional list of {vendorId, productId} (4 lowercase hex digits each)."""
+        usb_devices = self.VmData.get(self.Keyword.UsbDevices, None)
+        if usb_devices is None:
+            return
+        if not isinstance(usb_devices, list):
+            raise ValueError(f"Invalid [{self.Keyword.UsbDevices}], expect a list")
+        seen = set()
+        for device in usb_devices:
+            if not isinstance(device, dict):
+                raise ValueError(f"Invalid [{self.Keyword.UsbDevices}] entry [{device}], expect an object")
+            for key in (self.Keyword.VendorId, self.Keyword.ProductId):
+                value = device.get(key, None)
+                if not isinstance(value, str) or not self._UsbIdPattern.match(value):
+                    raise ValueError(f"Invalid [{self.Keyword.UsbDevices}] entry [{device}], "
+                                     f"[{key}] should be 4 lowercase hex digits")
+            dev_key = self.usb_device_key(device)
+            if dev_key in seen:
+                raise ValueError(f"Duplicate [{self.Keyword.UsbDevices}] entry [{dev_key}]")
+            seen.add(dev_key)
+
+    @staticmethod
+    def usb_hostdev_xml(device: dict, optional: bool = True) -> str:
+        """libvirt <hostdev> for USB passthrough, matched by vendor/product.
+
+        optional → startupPolicy='optional': the VM still starts when the device is
+        unplugged. Only meaningful in the domain definition, not for hot-plug.
+        """
+        source = "<source startupPolicy='optional'>" if optional else "<source>"
+        return (
+            "<hostdev mode='subsystem' type='usb' managed='yes'>"
+            f"{source}"
+            f"<vendor id='0x{device[KvmVm.Keyword.VendorId]}'/>"
+            f"<product id='0x{device[KvmVm.Keyword.ProductId]}'/>"
+            "</source>"
+            "</hostdev>"
+        )
+
+    def add_usb_hostdevs(self, domain_xml: str) -> str:
+        """Append a <hostdev> per usbDevices entry to the virt-install generated XML.
+
+        Not passed to virt-install as --hostdev: virt-install looks the device up on
+        the host and fails when it is unplugged, which startupPolicy='optional' is
+        meant to tolerate.
+        """
+        usb_devices = self.VmData.get(self.Keyword.UsbDevices, None) or []
+        if not usb_devices:
+            return domain_xml
+        root = ET.fromstring(domain_xml)
+        devices = root.find("devices")
+        if devices is None:
+            devices = ET.SubElement(root, "devices")
+        for device in usb_devices:
+            devices.append(ET.fromstring(self.usb_hostdev_xml(device)))
+        return ET.tostring(root, encoding="unicode")
 
     def parse_relative_path(self, file_path):
         vm_path = self.VmData[self.Keyword.VmPath]
@@ -517,8 +590,9 @@ class KvmVm:
         vm_def_file = os.path.join(vm_path, f"vm_def_{self.VmName}.xml")
         self.log.info(f"Run def creation command to generate VM definition XML file. [{vm_def_file}]")
         cmd_result = Util.run_command(" ".join(vm_create_cmd))
+        domain_xml = self.add_usb_hostdevs(cmd_result.stdout)
         with open(vm_def_file, "w") as fp:
-            fp.write(cmd_result.stdout)
+            fp.write(domain_xml)
         self.log.info(f"VM definition file created")
         self.log.info(f"Create vm [{self.VmName}] using definition XML. [{vm_def_file}]")
         Util.run_command(f"virsh create {vm_def_file}")

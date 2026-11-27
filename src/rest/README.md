@@ -161,6 +161,9 @@ curl -T ubuntu.iso -H 'Content-Type: application/octet-stream' \
 | POST | `/api/v1/vms/<name>/start` | 启动 VM |
 | POST | `/api/v1/vms/<name>/stop` | 停止 VM |
 | POST | `/api/v1/vms/<name>/eject-iso` | 卸载安装 ISO（VM 需已停止） |
+| GET | `/api/v1/vms/<name>/usb` | 列出 VM 配置的 USB 直通设备 |
+| POST | `/api/v1/vms/<name>/usb` | 把主机 USB 设备挂到 VM，见 [USB 直通](#usb-直通) |
+| DELETE | `/api/v1/vms/<name>/usb/<vendorId>:<productId>` | 卸下 USB 设备 |
 | POST | `/api/v1/vms/<name>/commit` | 将 qcow2 disk 变更提交到 backing image |
 | GET | `/api/v1/vms/<name>/console` | 网页 VNC 控制台（浏览器打开） |
 | POST | `/api/v1/vms/<name>/console` | 为控制台页面启动一次性 websockify（页面自动调用） |
@@ -310,6 +313,36 @@ sudo apt-get install -y novnc websockify
 | `consolePortMax` | `6099` | websockify 端口段终点（同时打开的控制台数上限） |
 
 未安装 websockify / noVNC 或端口用尽时返回 503 `CONSOLE_UNAVAILABLE`。
+
+### USB 直通
+
+把主机上的 USB 设备（如移动硬盘）挂给 VM。先用 [`GET /api/v1/devices?type=usb`](#主机设备) 找到设备，再按 `id` 或 `vendorId`/`productId` 挂载：
+
+```json
+POST /api/v1/vms/<name>/usb
+{"device": "2-1"}
+```
+
+```json
+POST /api/v1/vms/<name>/usb
+{"vendorId": "0bc2", "productId": "3343"}
+```
+
+- 写入 VM JSON 的 `usbDevices`（`[{"vendorId", "productId", "description"}]`），每次启动 VM 时据此生成 `<hostdev type='usb'>`。VM 运行中时还会立即热插（`virsh attach-device --live`）。返回 201，`hotplugged` 表示是否热插。
+- 按 `vendorId:productId` 匹配，所以换个 USB 口、重新插拔都不影响。主机上有两个 `vendorId:productId` 相同的设备时返回 409 `AMBIGUOUS_DEVICE`（无法区分）。
+- 设备 `attachable` 为 `false` 时返回 409 `DEVICE_UNAVAILABLE`，原因同 `/api/v1/devices`：已挂在其他 VM 上、已配置在其他 VM 的 `usbDevices` 中（即使那个 VM 已停止）、USB 硬盘在主机上有挂载点等。挂载前先在主机上 `umount`。
+- 设备不在主机上时返回 404 `DEVICE_NOT_FOUND`；已配置在本 VM 上时返回 200，`attached: false`（幂等）。
+- 启动时设备不在（已拔掉）不影响 VM 启动（`startupPolicy='optional'`），插回后需要重启 VM 或先 DELETE 再 POST 一次。
+
+卸下：
+
+```
+DELETE /api/v1/vms/<name>/usb/0bc2:3343
+```
+
+从 `usbDevices` 中移除；VM 运行中时立即热拔（`virsh detach-device --live`），返回中的 `unplugged` 表示是否热拔。来宾里先卸载文件系统，否则可能丢数据。
+
+`GET /api/v1/vms/<name>/usb` 返回每个已配置设备的 `present`（主机上是否插着）、`hostDevices`（对应的主机 USB `id`）、`liveAttached`（当前是否挂在运行中的 VM 上）。
 
 ### VM 认证方式
 
@@ -502,6 +535,7 @@ USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ �
 | 原因 | 说明 |
 |------|------|
 | `attached to VM [<vm>]` | 已挂在某个 libvirt domain 上（`virsh dumpxml` 中有对应的 `hostdev`/`disk`）。USB 硬盘无论以哪种方式挂出，两边都会标记 |
+| `configured on VM [<vm>]` | 已写入某个受管 VM JSON 的 `usbDevices`（见 [USB 直通](#usb-直通)）。该 VM 停止时没有 domain，但下次启动会再次占用。USB 条目的 `configuredOn` 列出这些 VM |
 | `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
 | `in use by host: ...` | 磁盘承载 LVM、RAID、LUKS 或 ZFS 成员 |
 
@@ -521,6 +555,7 @@ GET /api/v1/devices
         "speedMbps": "5000",
         "classes": ["massStorage"],
         "blockDevices": ["sdb"],
+        "configuredOn": [],
         "attachedTo": null, "attachable": true, "reason": null
       }
     ],
