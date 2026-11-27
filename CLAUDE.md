@@ -23,6 +23,9 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
 ./src/runpy.sh src/kvm/iso/kvm_iso.py --path <ISO数据文件路径.json>
 ./src/runpy.sh src/network/bridge/net_bridge.py --path <桥接数据文件路径.json>
 
+# 列出可挂给 VM 的主机设备（USB / 整块磁盘）
+./src/runpy.sh src/kvm/device/kvm_device.py [--type usb|block]
+
 # 生成随机 MAC 地址
 ./src/runpy.sh src/network/bridge/generate_mac.py
 
@@ -81,6 +84,10 @@ UniTao-ServerConfig 是一个数据驱动的服务器配置自动化工具。它
   - `remote`：从 `downloadLink` 下载，可选 `sha256` 校验。
   - `upload`：文件由 REST `PUT /api/v1/kvm_iso/<name>` 流式上传写入。
 - 幂等 — `isoPath` 处文件已存在则跳过。REST 层见 `src/rest/api_kvm_iso.py`（`isoDataDir` 存定义 JSON，`isoFileDir` 存 `.iso` 文件）。
+
+### 主机设备发现 (`src/kvm/device/kvm_device.py`)
+
+- **`KvmDevice.discover(type)`** — 只读列出可挂给 VM 的主机设备：`usb`（sysfs `/sys/bus/usb/devices`，跳过 hub，用于 USB 直通）和 `block`（`lsblk` 整块磁盘，用于块设备直通，附 `/dev/disk/by-id` 路径）。USB 硬盘两边互相关联。每个设备带 `attachable`/`reason`：已挂在某个 domain 上（解析 `virsh dumpxml`）、主机上有挂载点、或承载 LVM/RAID/LUKS/ZFS 时不可挂。REST 层为 `GET /api/v1/devices`（`src/rest/api_device.py`，支持 `?type=` 和 `?attachable=true`）。
 
 ### 网络桥接 (`src/network/bridge/`)
 

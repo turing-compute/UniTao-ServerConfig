@@ -15,6 +15,7 @@ from rest.api_bridge import bridge_bp
 from rest.api_schema import schema_bp
 from rest.api_utils import utils_bp
 from rest.api_console import console_bp
+from rest.api_device import device_bp
 
 # Config keys that are directory paths and should be resolved to absolute paths.
 _DIR_KEYS = ["vmDataDir", "imageDataDir", "imageFileDir", "isoDataDir", "isoFileDir", "bridgeDataDir", "hostKeyDir"]
@@ -117,6 +118,7 @@ def create_app(config: dict = None) -> Flask:
     app.register_blueprint(bridge_bp, url_prefix="/api/v1/bridges")
     app.register_blueprint(utils_bp, url_prefix="/api/v1/utils")
     app.register_blueprint(console_bp, url_prefix="/api/v1")
+    app.register_blueprint(device_bp, url_prefix="/api/v1/devices")
 
     register_error_handlers(app)
 

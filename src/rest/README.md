@@ -480,6 +480,74 @@ GET /api/v1/vms/<name>/inventory/<file>
 
 ---
 
+## 主机设备
+
+列出主机上可以挂给 VM 的设备（只读，不做挂载）：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/devices` | 列出 USB 设备和整块磁盘 |
+| GET | `/api/v1/devices?type=usb` | 只列 USB 设备（`type=block` 只列磁盘） |
+| GET | `/api/v1/devices?attachable=true` | 只列当前可挂载的设备 |
+
+两类设备对应两种挂法：
+
+- **`usb`**：USB 直通（`<hostdev type='usb'>`，按 `vendorId:productId` 匹配），来宾看到的是真实 USB 设备。来自 `/sys/bus/usb/devices`，hub（含 root hub）不列出。
+- **`block`**：块设备直通（`<disk type='block'>`），来宾看到的是一块磁盘。来自 `lsblk`，只列整块磁盘，`loop`/`zram`/`nbd`/`sr`/`dm-`/`md` 不列出。挂载时用 `byIdPath`（`/dev/disk/by-id/...`），设备重新插拔后 `/dev/sdX` 可能变化，by-id 路径不会。
+
+USB 硬盘在两边都会出现，并互相关联（USB 的 `blockDevices` ↔ 磁盘的 `usbDevice`）。
+
+每个设备都带 `attachable`；为 `false` 时 `reason` 说明原因：
+
+| 原因 | 说明 |
+|------|------|
+| `attached to VM [<vm>]` | 已挂在某个 libvirt domain 上（`virsh dumpxml` 中有对应的 `hostdev`/`disk`）。USB 硬盘无论以哪种方式挂出，两边都会标记 |
+| `mounted on host: ...` | 磁盘或其分区/LV 在主机上有挂载点（含 `[SWAP]`） |
+| `in use by host: ...` | 磁盘承载 LVM、RAID、LUKS 或 ZFS 成员 |
+
+主机和 VM 同时写同一块盘会损坏数据，所以挂载前先在主机上 `umount`。
+
+```json
+GET /api/v1/devices
+{
+  "success": true,
+  "data": {
+    "usb": [
+      {
+        "id": "2-1",
+        "vendorId": "0bc2", "productId": "3343",
+        "bus": 2, "device": 3,
+        "manufacturer": "Seagate", "product": "Expansion HDD", "serial": "NAAB1",
+        "speedMbps": "5000",
+        "classes": ["massStorage"],
+        "blockDevices": ["sdb"],
+        "attachedTo": null, "attachable": true, "reason": null
+      }
+    ],
+    "block": [
+      {
+        "id": "sdb",
+        "path": "/dev/sdb",
+        "byIdPath": "/dev/disk/by-id/usb-Seagate_Expansion_HDD_NAAB1-0:0",
+        "sizeBytes": 4000787030016,
+        "model": "Expansion HDD", "serial": "NAAB1",
+        "transport": "usb", "removable": false,
+        "usbDevice": "2-1",
+        "partitions": [{"name": "sdb1", "type": "part", "fsType": "ntfs", "sizeBytes": 4000785104896, "mountpoints": []}],
+        "mountpoints": [], "hostUse": [],
+        "attachedTo": null, "attachable": true, "reason": null
+      }
+    ]
+  }
+}
+```
+
+USB 的 `id` 是 sysfs 端口路径（`<bus>-<port>[.<port>]`），换个 USB 口就会变；磁盘的 `id` 是内核设备名。`virsh` 不可用时 `attachedTo` 一律为 `null`（日志中有 WARNING）。
+
+命令行同样可用：`./src/runpy.sh src/kvm/device/kvm_device.py [--type usb|block]`。
+
+---
+
 ## 其他
 
 | 方法 | 路径 | 说明 |
